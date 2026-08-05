@@ -1,0 +1,149 @@
+local l = game:GetService("Lighting")
+local w = game:GetService("Workspace")
+local p = game:GetService("Players")
+local t = w:FindFirstChildOfClass("Terrain")
+local c = w.CurrentCamera
+
+local function lockLighting()
+    pcall(function()
+        l.GlobalShadows = false
+        l.Brightness = 2 -- Dinaikkan agar tidak gelap
+        l.ClockTime = 0
+        l.FogEnd = 100000
+        
+        l.OutdoorAmbient = Color3.fromRGB(150, 150, 150)
+        l.Ambient = Color3.fromRGB(150, 150, 150)
+        
+        if sethiddenproperty then
+            sethiddenproperty(l, "Technology", 2)
+        else
+            l.Technology = 2
+        end
+
+        for _, v in pairs(l:GetDescendants()) do
+            if v:IsA("Atmosphere") or v:IsA("PostEffect") or v:IsA("Clouds") then
+                v:Destroy()
+            elseif v:IsA("Sky") and v.Name ~= "BlackSkyNoStars" then
+                v:Destroy()
+            end
+        end
+
+        if not l:FindFirstChild("BlackSkyNoStars") then
+            local s = Instance.new("Sky")
+            s.Name = "BlackSkyNoStars"
+            s.StarCount = 0 -- Mematikan bintang bawaan Roblox
+            s.MoonTextureId = ""
+            s.SunTextureId = ""
+            s.SkyboxBk = ""
+            s.SkyboxDn = ""
+            s.SkyboxFt = ""
+            s.SkyboxLf = ""
+            s.SkyboxRt = ""
+            s.SkyboxUp = ""
+            s.Parent = l
+        end
+    end)
+end
+
+lockLighting()
+
+l:GetPropertyChangedSignal("ClockTime"):Connect(lockLighting)
+l:GetPropertyChangedSignal("TimeOfDay"):Connect(lockLighting)
+
+l.ChildAdded:Connect(function(child)
+    task.wait()
+    if child:IsA("Sky") and child.Name ~= "BlackSkyNoStars" then
+        pcall(function() child:Destroy() end)
+    elseif child:IsA("Atmosphere") or child:IsA("PostEffect") or child:IsA("Clouds") then
+        pcall(function() child:Destroy() end)
+    end
+end)
+
+local function disableWeatherVFX(v)
+    pcall(function()
+        local n = string.lower(v.Name)
+        if v:IsA("ParticleEmitter") or string.find(n, "storm") or string.find(n, "wind") or string.find(n, "snow") or string.find(n, "fog") or string.find(n, "radiant") then
+            v.Enabled = false
+            v:Destroy()
+        end
+    end)
+end
+
+if c then
+    for _, v in pairs(c:GetDescendants()) do 
+        disableWeatherVFX(v) 
+    end
+    c.DescendantAdded:Connect(disableWeatherVFX)
+end
+
+if t then
+    pcall(function()
+        t.WaterWaveSize = 0
+        t.WaterTransparency = 1
+        t.WaterWaveSpeed = 0
+        t.WaterReflectance = 0
+    end)
+end
+
+local function ig(o)
+    if not o then return true end
+    local n = string.lower(o.Name)
+    local pa = o.Parent and string.lower(o.Parent.Name) or ""
+    return string.find(n, "rod") or string.find(pa, "rod") or string.find(n, "bait") or string.find(pa, "bait") or string.find(n, "bobber") or string.find(pa, "bobber") or string.find(n, "lure") or string.find(pa, "lure")
+end
+
+local function opt(i)
+    if ig(i) then return end
+    pcall(function()
+        if i:IsA("BasePart") then
+            i.Material = Enum.Material.SmoothPlastic
+            i.CastShadow = false
+        elseif i:IsA("Decal") or i:IsA("Texture") then
+            i.Transparency = 1
+        elseif i:IsA("ParticleEmitter") or i:IsA("Trail") or i:IsA("Fire") or i:IsA("Smoke") or i:IsA("Sparkles") or i:IsA("Light") then
+            i.Enabled = false
+        elseif i.Name == "DestinationBeam" then
+            pcall(function() i.Enabled = false end)
+            pcall(function() i.Transparency = 1 end)
+        end
+    end)
+end
+
+local function blk(c)
+    for _, o in pairs(c:GetDescendants()) do
+        if not ig(o) then
+            pcall(function()
+                if o:IsA("BasePart") then
+                    o.Material = Enum.Material.SmoothPlastic
+                    o.CastShadow = false
+                elseif o:IsA("SpecialMesh") or o:IsA("CharacterMesh") or o:IsA("Shirt") or o:IsA("Pants") or o:IsA("ShirtGraphic") or o:IsA("Accessory") then
+                    o:Destroy()
+                elseif o:IsA("Decal") and o.Name == "face" then
+                    o.Transparency = 1
+                end
+            end)
+        end
+    end
+end
+
+for _, o in pairs(w:GetDescendants()) do
+    opt(o)
+end
+
+w.DescendantAdded:Connect(opt)
+
+local function sp(pl)
+    if pl.Character then
+        blk(pl.Character)
+    end
+    pl.CharacterAdded:Connect(function(nc)
+        task.wait(1)
+        blk(nc)
+    end)
+end
+
+for _, pl in pairs(p:GetPlayers()) do
+    sp(pl)
+end
+
+p.PlayerAdded:Connect(sp)
