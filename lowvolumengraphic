@@ -1,0 +1,44 @@
+local gs = UserSettings():GetService("UserGameSettings")
+local rs = settings().Rendering
+
+
+local success1, err1 = pcall(function()
+    gs.MasterVolume = 0
+    gs.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+    rs.QualityLevel = Enum.QualityLevel.Level01
+    end)
+
+    if success1 then
+    print("volume and graphic set to lowest")
+        return
+    end
+
+local success2, err2 = pcall(function()
+    gs.MasterVolume = 0
+    gs.SavedQualityLevel = 1
+    rs.QualityLevel = 1
+    end)
+
+    if success2 then
+    print("SUCCESS: Raw Integer Method executed perfectly.")
+    print("volume and graphic set to lowest")
+        return
+    end
+
+    if type(sethiddenproperty) == "function" then
+    local success3, err3 = pcall(function()
+        sethiddenproperty(gs, "MasterVolume", 0)
+        sethiddenproperty(gs, "SavedQualityLevel", Enum.SavedQualitySetting.QualityLevel1)
+        sethiddenproperty(rs, "QualityLevel", Enum.QualityLevel.Level01)
+    end)
+    
+    if success3 then
+        print("SUCCESS: sethiddenproperty Method executed perfectly.")
+        print("volume and graphic set to lowest")
+        return
+    else
+        warn("FAILED: sethiddenproperty threw an error nya: " .. tostring(err3))
+    end
+else
+    warn("FAILED: Executor lacks sethiddenproperty. Errors: [Method 1: " .. tostring(err1) .. "] [Method 2: " .. tostring(err2) .. "]")
+end
