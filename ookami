@@ -1,0 +1,238 @@
+--// OokamiYuu Compact Separated Buttons
+
+repeat
+    task.wait()
+until game:IsLoaded()
+
+--// Services
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+
+local LP = Players.LocalPlayer
+
+--// Settings
+local executorURL = "https://ookami-fps-new.netlify.app/"
+
+local HidePlayersEnabled = false
+local FrameExpanded = true
+
+--================================================--
+-- Anti AFK
+--================================================--
+
+pcall(function()
+    if getconnections then
+        for _, connection in pairs(getconnections(LP.Idled)) do
+            connection:Disable()
+        end
+    end
+end)
+
+--================================================--
+-- GUI
+--================================================--
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Parent = LP.PlayerGui
+
+local Frame = Instance.new("Frame")
+Frame.Size = UDim2.new(0, 120, 0, 60)
+Frame.Position = UDim2.new(0, 10, 0.5, -30)
+Frame.BackgroundColor3 = Color3.new(0, 0, 0)
+Frame.BackgroundTransparency = 0.35
+Frame.Active = true
+Frame.Draggable = true
+Frame.Parent = ScreenGui
+
+--================================================--
+-- Executor Button
+--================================================--
+
+local RawButton = Instance.new("TextButton")
+RawButton.Size = UDim2.new(0, 110, 0, 22)
+RawButton.Position = UDim2.new(0, 5, 0, 5)
+RawButton.Text = "OOKAMI YUU EXEC"
+RawButton.TextScaled = true
+RawButton.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+RawButton.TextColor3 = Color3.new(1, 1, 1)
+RawButton.Parent = Frame
+
+--================================================--
+-- Hide Players Button
+--================================================--
+
+local ToggleButton = Instance.new("TextButton")
+ToggleButton.Size = UDim2.new(0, 110, 0, 18)
+ToggleButton.Position = UDim2.new(0, 5, 0, 32)
+ToggleButton.Text = "HIDE PLAYERS"
+ToggleButton.TextScaled = false
+ToggleButton.TextSize = 12
+ToggleButton.BackgroundColor3 = Color3.new(1, 0, 0)
+ToggleButton.TextColor3 = Color3.new(1, 1, 1)
+ToggleButton.Parent = Frame
+
+--================================================--
+-- Minimize Button
+--================================================--
+
+local MinimizeButton = Instance.new("TextButton")
+MinimizeButton.Size = UDim2.new(0, 12, 0, 12)
+MinimizeButton.Position = UDim2.new(1, -14, 0, 2)
+MinimizeButton.Text = "-"
+MinimizeButton.TextScaled = true
+MinimizeButton.BackgroundTransparency = 0.3
+MinimizeButton.BackgroundColor3 = Color3.new(0, 0, 0)
+MinimizeButton.TextColor3 = Color3.new(1, 1, 1)
+MinimizeButton.Parent = Frame
+
+--================================================--
+-- Executor
+--================================================--
+
+RawButton.MouseButton1Click:Connect(function()
+    RawButton.BackgroundColor3 = Color3.fromRGB(0, 200, 0)
+
+    pcall(function()
+        loadstring(game:HttpGet(executorURL))()
+    end)
+
+    task.wait(0.3)
+
+    RawButton.BackgroundColor3 = Color3.fromRGB(200, 0, 0)
+end)
+
+--================================================--
+-- Hide Players
+--================================================--
+
+ToggleButton.MouseButton1Click:Connect(function()
+    HidePlayersEnabled = not HidePlayersEnabled
+
+    ToggleButton.BackgroundColor3 =
+        HidePlayersEnabled and Color3.new(0, 1, 0) or Color3.new(1, 0, 0)
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player.Character then
+            for _, part in pairs(player.Character:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.Transparency = HidePlayersEnabled and 1 or 0
+                end
+            end
+        end
+    end
+end)
+
+--================================================--
+-- Minimize / Expand
+--================================================--
+
+MinimizeButton.MouseButton1Click:Connect(function()
+    if FrameExpanded then
+        RawButton.Visible = false
+        ToggleButton.Visible = false
+
+        Frame.Size = UDim2.new(0, 25, 0, 18)
+        MinimizeButton.Text = "+"
+    else
+        RawButton.Visible = true
+        ToggleButton.Visible = true
+
+        Frame.Size = UDim2.new(0, 120, 0, 60)
+        MinimizeButton.Text = "-"
+    end
+
+    FrameExpanded = not FrameExpanded
+end)
+
+--================================================--
+-- Optimization
+--================================================--
+
+local function Musnahkan(v)
+    task.spawn(function()
+        pcall(function()
+
+            if v:IsA("MeshPart")
+                or v:IsA("UnionOperation")
+                or v:IsA("SpecialMesh")
+                or v:IsA("ParticleEmitter")
+                or v:IsA("Trail")
+                or v:IsA("Beam")
+                or v:IsA("Sparkles")
+                or v:IsA("Fire")
+                or v:IsA("Smoke")
+                or v:IsA("Explosion")
+                or v:IsA("PostEffect")
+                or v:IsA("Light")
+                or v:IsA("SelectionBox")
+                or v:IsA("Decal")
+                or v:IsA("Texture")
+                or v:IsA("Clothing")
+                or v:IsA("ShirtGraphic") then
+
+                v:Destroy()
+
+            elseif v:IsA("BasePart") and not v:IsA("Terrain") then
+
+                v.Material = Enum.Material.SmoothPlastic
+                v.Reflectance = 0
+                v.CastShadow = false
+                v.Color = Color3.fromRGB(50, 50, 50)
+
+            elseif v:IsA("BillboardGui") or v:IsA("SurfaceGui") then
+
+                if not v.Parent:IsA("Player") then
+                    v:Destroy()
+                end
+            end
+        end)
+    end)
+end
+
+Workspace.DescendantAdded:Connect(Musnahkan)
+
+task.spawn(function()
+    for _, object in pairs(Workspace:GetDescendants()) do
+        Musnahkan(object)
+    end
+end)
+
+--================================================--
+-- Lighting
+--================================================--
+
+for _, child in pairs(Lighting:GetChildren()) do
+    if child:IsA("Sky") then
+        child:Destroy()
+    end
+end
+
+Lighting.FogEnd = 0
+Lighting.Brightness = 0
+Lighting.Ambient = Color3.new(0, 0, 0)
+Lighting.GlobalShadows = false
+
+settings().Rendering.QualityLevel = 1
+
+--================================================--
+-- FPS Optimizer
+--================================================--
+
+RunService.Heartbeat:Connect(function()
+    local fps = game:GetService("Stats").PerformanceStats.Fps
+
+    if fps < 15 then
+        settings().Rendering.QualityLevel = 1
+        settings().Rendering.GraphicsQuality = Enum.GraphicsQuality.Level1
+
+    elseif fps < 30 then
+        settings().Rendering.QualityLevel = 2
+
+    else
+        settings().Rendering.QualityLevel = 3
+    end
+end)
+
+print("Ookami Yuu Compact Separated Buttons Ready.") 
