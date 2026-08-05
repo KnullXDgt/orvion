@@ -1,0 +1,10 @@
+local Players = game:GetService("Players")
+local LP = Players.LocalPlayer
+
+pcall(function()
+    if getconnections then
+        for _, connection in pairs(getconnections(LP.Idled)) do
+            connection:Disable()
+        end
+    end
+end)
