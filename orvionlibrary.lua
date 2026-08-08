@@ -224,7 +224,8 @@ function OrvionLib:CreateWindow(config)
     IconLabel.Size = UDim2.new(0, 16, 0, 16)
     IconLabel.Position = UDim2.new(0, 6, 0.5, 0)
     IconLabel.AnchorPoint = Vector2.new(0, 0.5)
-    IconLabel.Image = "rbxassetid://88499385264699"
+    IconLabel.Image = config.Icon or ""
+    IconLabel.Visible = config.Icon ~= nil
     IconLabel.ScaleType = Enum.ScaleType.Fit
 
     local IconCorner = Instance.new("UICorner", IconLabel)
@@ -232,7 +233,7 @@ function OrvionLib:CreateWindow(config)
 
     local TitleLabel = Instance.new("TextLabel", Top)
     TitleLabel.BackgroundTransparency = 1
-    TitleLabel.Position = UDim2.new(0, 28, 0, 9)
+    TitleLabel.Position = config.Icon and UDim2.new(0, 28, 0, 9) or UDim2.new(0, 10, 0, 9)
     TitleLabel.Size = UDim2.new(0, 250, 0, 20)
     TitleLabel.Font = Enum.Font.GothamBold
     TitleLabel.Text = titleText
