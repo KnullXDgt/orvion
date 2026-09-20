@@ -751,24 +751,41 @@ screen_start = function(cfg, mode)
 
     local st = {}
     local t0 = os.time()
+    local lstat = {}   -- name -> "wait" | "starting" | "done"
 
-    -- show the monitor screen IMMEDIATELY so the user is not stuck on the
-    -- previous menu while we force-stop / write layout / launch each clone.
-    head("Start [" .. mode .. "]  (starting)")
-    box_open("resource"); box_line(fmt_res()); box_close()
-    print("")
-    box_open("package")
-    for i, name in ipairs(names) do
-        box_line(string.format("%-22s %s", cut(name, 22), "starting..."))
+    -- draw the launch screen: the package being launched shows "starting...",
+    -- the ones still waiting for their turn show a live countdown.
+    local function draw_launch(active_idx, wait_next)
+        head("Start [" .. mode .. "]  (starting)")
+        box_open("resource"); box_line(fmt_res()); box_close()
+        print("")
+        box_open("package")
+        for i, name in ipairs(names) do
+            local txt
+            if lstat[name] == "done" then
+                txt = "launched"
+            elseif i == active_idx then
+                txt = "starting..."
+            else
+                local w = wait_next + (i - active_idx - 1) * cfg.launch_delay
+                if w < 0 then w = 0 end
+                txt = "wait " .. w .. "s"
+            end
+            box_line(string.format("%-22s %s", cut(name, 22), txt))
+        end
+        box_close()
+        print("")
+        col("90"); print("launching clients..."); off()
+        io.flush()
     end
-    box_close()
-    print("")
-    col("90"); print("launching clients..."); off()
-    io.flush()
+
+    for _, name in ipairs(names) do lstat[name] = "wait" end
 
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
+        lstat[name] = "starting"
+        draw_launch(i, cfg.launch_delay)
         su_exec("am force-stop " .. name)
         sleep(1)
         apply_layout(name, L, T, R, B)
@@ -787,7 +804,16 @@ screen_start = function(cfg, mode)
             fails = {},
             disc_key = nil,
         }
-        if i < #names then sleep(cfg.launch_delay) end
+        lstat[name] = "done"
+        if i < #names then
+            -- countdown until the next package starts
+            local d = cfg.launch_delay
+            while d > 0 do
+                draw_launch(i, d)
+                sleep(1)
+                d = d - 1
+            end
+        end
     end
 
     local quit = false
