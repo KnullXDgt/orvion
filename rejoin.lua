@@ -438,18 +438,21 @@ end
 local function apply_layout(pkg, L, T, R, B)
     local pref = "/data/data/" .. pkg .. "/shared_prefs/" .. pkg .. "_preferences.xml"
     su_exec("chmod 666 " .. pref)
-    local args = {}
-    for _, f in ipairs({
-        { "app_cloner_current_window_left", L }, { "app_cloner_current_window_top", T },
-        { "app_cloner_current_window_right", R }, { "app_cloner_current_window_bottom", B },
-    }) do
-        table.insert(args, "-e 's/name=\\\\\"" .. f[1] .. "\\\\\" value=\\\\\"[^\\\\\"]*\\\\\"/name=\\\\\"" .. f[1] .. "\\\\\" value=\\\\\"" .. f[2] .. "\\\\\"/g'")
+    local keys = {
+        { "app_cloner_current_window_left", L },
+        { "app_cloner_current_window_top", T },
+        { "app_cloner_current_window_right", R },
+        { "app_cloner_current_window_bottom", B },
+    }
+    for _, f in ipairs(keys) do
+        -- sed pattern: match name="KEY" value="<anything>" and replace value.
+        -- NOTE: exactly two backslashes before the quote (Lua \" -> shell \")
+        local pat = 's/name=\"' .. f[1] .. '\" value=\"[^\"]*\"/name=\"' .. f[1] .. '\" value=\"' .. f[2] .. '\"/g'
+        su_exec("sed -i '" .. pat .. "' " .. pref)
     end
-    su_exec("sed -i " .. table.concat(args, " ") .. " " .. pref)
     su_exec("chmod 444 " .. pref)
 end
 
--- exactly like baseline: n==1 fullscreen, else equal rows offset by status bar
 local function grid_bounds(i, n, sw, sh, off)
     if n == 1 then return 0, 0, sw, sh end
     local gh = math.floor((sh - off) / n)
