@@ -380,6 +380,38 @@ local function scan_state(names)
     return pm, dis
 end
 
+-- username per package, parsed from the Roblox log (cached, light)
+local _users, _users_t = {}, 0
+local function user_map(pm)
+    local pid2pkg = {}
+    for pkg, pid in pairs(pm) do pid2pkg[pid] = pkg end
+    if next(pid2pkg) == nil then return {} end
+    local out = su_cmd("logcat -d -t 3000 -s Roblox 2>/dev/null | grep -aiE 'username|displayname' | tail -40")
+    local res = {}
+    for line in out:gmatch("[^\n]+") do
+        local pid  = line:match("^%d+-%d+%s+%d+:%d+:%d+%.%d+%s+(%d+)")
+        local user = line:match('[Uu]ser[Nn]ame"?%s*[:=]%s*"?([%w_]+)')
+                  or line:match('[Dd]isplay[Nn]ame"?%s*[:=]%s*"([^"]+)"')
+        if pid and user then
+            local pkg = pid2pkg[tonumber(pid)]
+            if pkg and not res[pkg] then res[pkg] = user end
+        end
+    end
+    return res
+end
+
+-- cached pids + usernames for menu display (1 su call / 20s)
+local _info = { t = 0, pm = {}, users = {} }
+local function pkg_info(names)
+    local now = os.time()
+    if now - _info.t >= 20 then
+        _info.pm = scan_state(names)
+        _info.users = user_map(_info.pm)
+        _info.t = now
+    end
+    return _info.pm, _info.users
+end
+
 -- ============================================================
 -- LAYOUT
 -- ============================================================
@@ -482,6 +514,7 @@ local screen_start, screen_rejoin, screen_prefix, screen_packages, screen_server
 local function screen_menu(cfg)
     local note
     while true do
+        local det = detect(cfg.prefix)
         local sel = selected_list(cfg)
         head("Main")
 
@@ -490,26 +523,28 @@ local function screen_menu(cfg)
         box_close()
         print("")
 
-        box_open("package")
+        box_open("selected (" .. #sel .. ")")
         if #sel == 0 then
-            box_line("(none selected)")
+            box_line("(none -- open [4] Packages to pick)")
         else
+            local _, users = pkg_info(sel)
             for _, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
-                box_line(string.format("%-24s %s", cut(name, 24), p.on == 1 and "on" or "off"))
+                local u = users[name] and (" (" .. cut(users[name], 14) .. ")") or ""
+                box_line(string.format("%-24s%s", cut(name, 24), u))
             end
         end
         box_close()
         print("")
 
         print("Main Menu:")
-        print("  [1] - Start")
-        print("  [2] - Rejoin")
-        print("  [3] - Prefix")
-        print("  [4] - Packages")
-        print("  [5] - Server")
-        print("  [6] - Layout")
-        print("  [0] - Exit")
+        print("  1. Start")
+        print("  2. Rejoin")
+        print("  3. Prefix")
+        print("  4. Packages")
+        print("  5. Server")
+        print("  6. Layout")
+        print("  0. Exit")
         print("")
         local c = prompt(note, "Select")
         note = nil
@@ -523,6 +558,7 @@ local function screen_menu(cfg)
         else note = "!invalid choice" end
     end
 end
+
 
 -- ---- START ----
 local function fmt_clock(sec)
@@ -741,40 +777,41 @@ screen_rejoin = function(cfg)
     end
 end
 
--- ---- PREFIX ---- (single prefix, ketik langsung untuk ganti)
+-- ---- PREFIX ---- (set prefix -> langsung detect)
 screen_prefix = function(cfg)
-    local note, scan
+    local note
     while true do
+        local det = detect(cfg.prefix)
         head("Prefix")
         box_open("prefix")
         box_line(cfg.prefix)
         box_close()
-        if scan then
-            print("")
-            box_open("scan result (" .. #scan .. ")")
-            if #scan == 0 then box_line("(no package matched)")
-            else for i, p in ipairs(scan) do box_line(string.format("%-3d %s", i, p)) end end
-            box_close()
-        end
         print("")
-        print("  [type] - set new prefix")
-        print("  [s] - scan package")
-        print("  [0] - Back")
+        box_open("detected (" .. #det .. ")")
+        if #det == 0 then
+            box_line("(none -- source: " .. _pkg_src .. ")")
+        else
+            for i, p in ipairs(det) do box_line(string.format("%-3d %s", i, p)) end
+        end
+        box_close()
+        print("")
+        print("  1. set prefix")
+        print("  0. back")
         print("")
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
-        if c:lower() == "s" then
-            scan = detect(cfg.prefix, true)
-            if #scan == 0 then note = "!no package matched" end
-        else
-            local p = c:gsub("%s", "")
-            if p == "" then note = "!empty"
-            elseif p:match("^[%w_%.]+$") then
-                cfg.prefix = p; save_cfg(cfg); scan = nil
-                note = "prefix set: " .. p
-            else note = "!invalid format" end
-        end
+        if c == "1" then
+            local p = prompt(nil, "new prefix (e.g. com.moons)")
+            if p then
+                p = p:gsub("%s", "")
+                if p == "" then note = "!empty"
+                elseif p:match("^[%w_%.]+$") then
+                    cfg.prefix = p; save_cfg(cfg); drop_cache()
+                    note = "prefix set: " .. p
+                else note = "!invalid format" end
+            end
+        else note = "!invalid choice" end
     end
 end
 
