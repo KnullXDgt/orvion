@@ -189,10 +189,13 @@ end
 
 -- single key: sama persis baseline
 local function read_key(t)
-    local h = io.popen("bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null && echo $k' 2>/dev/null")
+    local h = io.popen("bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null; printf \"%s\" \"$k\"' 2>/dev/null")
     if not h then sleep(t or 1); return nil end
-    local k = h:read("*l"); h:close()
-    return (k and k ~= "") and k or nil
+    local k = h:read("*a"); h:close()
+    if k == nil then return nil end
+    k = k:gsub("[\r\n]", "")
+    if k == "" then return "" end     -- "" means Enter was pressed
+    return k
 end
 
 -- prompt input dengan pesan (opsional). "!" prefix = error (merah), lain = ok (hijau)
@@ -509,6 +512,13 @@ local function ensure_pkg(cfg, name)
 end
 
 -- range input like baseline: "1,2,3" / "1-10" / "2,5-8"
+-- true if the input means "all servers" (empty, all, a, *, -1)
+local function is_all_input(r)
+    if r == nil then return false end
+    local l = r:lower():gsub("%s", "")
+    return l == "" or l == "all" or l == "a" or l == "*" or l == "semua" or l == "-"
+end
+
 local function parse_range(input, max)
     local sel, seen = {}, {}
     local a, b = input:match("^(%d+)%s*%-%s*(%d+)$")
@@ -655,6 +665,21 @@ screen_start = function(cfg)
 
     local st = {}
     local t0 = os.time()
+
+    -- show the monitor screen IMMEDIATELY so the user is not stuck on the
+    -- previous menu while we force-stop / write layout / launch each clone.
+    head("Start  (starting)")
+    box_open("resource"); box_line(fmt_res()); box_close()
+    print("")
+    box_open("package")
+    for i, name in ipairs(names) do
+        box_line(string.format("%-22s %s", cut(name, 22), "starting..."))
+    end
+    box_close()
+    print("")
+    col("90"); print("launching clients..."); off()
+    io.flush()
+
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
@@ -712,10 +737,11 @@ screen_start = function(cfg)
         end
         box_close()
         print("")
-        col("90"); print("press y to stop & close all   |   n continue"); off()
+        col("90"); print("press y or Enter to stop & close all"); off()
 
         local k = read_key(1)
-        if k and k:lower() == "y" then quit = true; break end
+        -- y or Enter => stop & force-stop all
+        if k == "" or (k and k:lower() == "y") then quit = true; break end
 
         now = os.time()
         for _, name in ipairs(names) do
@@ -811,13 +837,18 @@ screen_rejoin = function(cfg)
                 local n = tonumber(prompt(nil, "package number"))
                 if n and n >= 1 and n <= #sel then
                     local name = sel[n]
-                    local r = prompt(nil, "ps (1,2 / 1-3 / empty=all)")
+                    local r = prompt(nil, "ps: 1-" .. #cfg.ps .. " or all")
                     if r ~= nil then
                         local idxs = parse_range(r, #cfg.ps)
-                        if r == "" or #idxs > 0 then
-                            cfg.pkgs[name].ps = (r == "") and "" or r; save_cfg(cfg)
-                            note = name .. " -> " .. (r == "" and "all" or r)
-                        else note = "!invalid ps range" end
+                        if is_all_input(r) then
+                            cfg.pkgs[name].ps = ""; save_cfg(cfg)
+                            note = name .. " -> all"
+                        elseif #idxs > 0 then
+                            cfg.pkgs[name].ps = r; save_cfg(cfg)
+                            note = name .. " -> " .. r
+                        else
+                            note = "!invalid: 1-" .. #cfg.ps .. ", or all"
+                        end
                     end
                 else note = "!invalid number" end
             end
@@ -932,14 +963,20 @@ screen_packages = function(cfg)
                 local n = tonumber(prompt(nil, "package number"))
                 if n and n >= 1 and n <= #det then
                     local name = det[n]
-                    local r = prompt(nil, "server (1 / 1,2 / 1-3 / empty=all)")
+                    local r = prompt(nil, "server: 1-" .. #cfg.ps .. " or all")
                     if r ~= nil then
                         local idxs = parse_range(r, #cfg.ps)
-                        if r == "" or #idxs > 0 then
-                            ensure_pkg(cfg, name).ps = (r == "") and "" or r
+                        if is_all_input(r) then
+                            ensure_pkg(cfg, name).ps = ""
                             save_cfg(cfg)
-                            note = cut(name, 20) .. " -> " .. (r == "" and "all" or r)
-                        else note = "!invalid server range" end
+                            note = cut(name, 20) .. " -> all"
+                        elseif #idxs > 0 then
+                            ensure_pkg(cfg, name).ps = r
+                            save_cfg(cfg)
+                            note = cut(name, 20) .. " -> " .. r
+                        else
+                            note = "!invalid: 1-" .. #cfg.ps .. ", or all"
+                        end
                     end
                 else note = "!invalid number" end
             end
