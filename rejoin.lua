@@ -55,6 +55,7 @@ local function load_cfg()
         launch_delay = 10,
         place_id = "", autoexec_path = "", autoexec_script = "",
         prefix = DEF_PREFIX, ps = {}, pkgs = {},
+        mode = "hopper",
     }
     local f = io.open(CFG_PATH, "r")
     if not f then
@@ -69,6 +70,8 @@ local function load_cfg()
                     if v ~= "" then cfg.prefix = v end
                 elseif k == "launch_delay" then cfg.launch_delay = tonumber(v) or cfg.launch_delay
                 elseif k == "place_id" then cfg.place_id = v
+                elseif k == "mode" then
+                    if v == "hopper" or v == "rejoin" then cfg.mode = v end
                 elseif k == "autoexec_path" then cfg.autoexec_path = v
                 elseif k == "autoexec_script" then cfg.autoexec_script = v
                 elseif k == "pkg" then
@@ -105,6 +108,7 @@ local function save_cfg(cfg)
     f:write("autoexec_path=" .. cfg.autoexec_path .. "\n")
     f:write("autoexec_script=" .. cfg.autoexec_script .. "\n")
     f:write("prefix=" .. cfg.prefix .. "\n")
+    f:write("mode=" .. (cfg.mode or "hopper") .. "\n")
     for name, p in pairs(cfg.pkgs) do
         local ps_str = (p.ps or ""):gsub(",", ";")
         f:write(string.format("pkg=%s,%d,%d,%d,%d,%s\n",
@@ -192,14 +196,22 @@ local function read_line()
     return r
 end
 
--- single key: sama persis baseline
+-- single key, waits up to t seconds.
+--   nil  -> timeout (NO key pressed)  <-- must NOT be treated as Enter
+--   ""   -> Enter pressed
+--   "x"  -> the key
+-- We use the shell exit code: `read -t` returns >128 on timeout, 0 on a real key.
 local function read_key(t)
-    local h = io.popen("bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null; printf \"%s\" \"$k\"' 2>/dev/null")
+    local cmd = "bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null; " ..
+                "if [ $? -eq 0 ]; then printf \"K%s\" \"$k\"; else printf __TO__; fi' 2>/dev/null"
+    local h = io.popen(cmd)
     if not h then sleep(t or 1); return nil end
     local k = h:read("*a"); h:close()
     if k == nil then return nil end
     k = k:gsub("[\r\n]", "")
-    if k == "" then return "" end     -- "" means Enter was pressed
+    if k == "__TO__" or k == "" then return nil end   -- timeout / no tty
+    if k == "K" then return "" end                    -- Enter
+    if k:sub(1, 1) == "K" then return k:sub(2) end
     return k
 end
 
@@ -498,9 +510,10 @@ end
 -- LISTS
 -- ============================================================
 local function active_list(cfg)
+    -- a selected package IS active (no separate on/off switch)
     local out = {}
     for name, p in pairs(cfg.pkgs) do
-        if p.selected == 1 and p.on == 1 then table.insert(out, name) end
+        if p.selected == 1 then table.insert(out, name) end
     end
     table.sort(out); return out
 end
@@ -658,8 +671,19 @@ local function screen_menu(cfg)
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return "exit" end
-        if c == "1" then screen_start(cfg)
-        elseif c == "2" then screen_rejoin(cfg)
+        if c == "1" then
+            -- quick start with the last used mode
+            screen_start(cfg, cfg.mode or "hopper")
+        elseif c == "2" then
+            -- Rejoin: choose the mode first
+            head("Rejoin  >  mode")
+            print("  1. Mode Hopper   (rotate private server every rejoin)")
+            print("  2. Mode Rejoin   (stay on the same private server)")
+            print("  0. Back")
+            print("")
+            local m = prompt(nil, "mode (1/2)")
+            if m == "1" then cfg.mode = "hopper"; save_cfg(cfg); screen_rejoin(cfg, "hopper")
+            elseif m == "2" then cfg.mode = "rejoin"; save_cfg(cfg); screen_rejoin(cfg, "rejoin") end
         elseif c == "3" then screen_prefix(cfg)
         elseif c == "4" then screen_packages(cfg)
         elseif c == "5" then screen_server(cfg)
@@ -673,6 +697,17 @@ end
 local function fmt_clock(sec)
     return string.format("%02d:%02d:%02d",
         math.floor(sec / 3600), math.floor((sec % 3600) / 60), sec % 60)
+end
+
+-- how long a package has been on its current PS (like baseline fmt_elapsed)
+local function fmt_elapsed(sec)
+    if not sec or sec < 0 then sec = 0 end
+    local h = math.floor(sec / 3600)
+    local m = math.floor((sec % 3600) / 60)
+    local ss = sec % 60
+    if h > 0 then return string.format("%dh %dm", h, m)
+    elseif m > 0 then return string.format("%dm %ds", m, ss)
+    else return string.format("%ds", ss) end
 end
 
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
@@ -691,7 +726,8 @@ local function relaunch(s, p, cfg, name, reason, scheduled, now)
     end
 end
 
-screen_start = function(cfg)
+screen_start = function(cfg, mode)
+    mode = mode or cfg.mode or "hopper"
     local names = active_list(cfg)
     if #names == 0 then
         head("Start"); col("31"); print("no package enabled."); off()
@@ -718,7 +754,7 @@ screen_start = function(cfg)
 
     -- show the monitor screen IMMEDIATELY so the user is not stuck on the
     -- previous menu while we force-stop / write layout / launch each clone.
-    head("Start  (starting)")
+    head("Start [" .. mode .. "]  (starting)")
     box_open("resource"); box_line(fmt_res()); box_close()
     print("")
     box_open("package")
@@ -733,17 +769,18 @@ screen_start = function(cfg)
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
-        -- order matters (like baseline): force-stop FIRST, then write layout,
-        -- then launch. Otherwise App Cloner overwrites the prefs on shutdown.
         su_exec("am force-stop " .. name)
         sleep(1)
         apply_layout(name, L, T, R, B)
         local plist = ps_list_of(p, cfg)
+        if mode == "rejoin" then plist = { plist[1] } end   -- stay on ONE server
         launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", true)
         st[name] = {
             hb_next = os.time() + p.heartbeat,
-            rj_next = os.time() + p.rejoin,
-            status = "rejoin",
+            rj_next = os.time() + (p.rejoin * 60),   -- minutes -> seconds
+            joined  = os.time(),
+            hops    = 0,
+            status  = "join",
             plist = plist,
             pptr = 1,
             halted = false, halt_code = nil,
@@ -764,33 +801,52 @@ screen_start = function(cfg)
             pm, dis = scan_state(names)   -- ONE su call: pids + disconnect codes
         end
 
-        head("Start  (" .. fmt_clock(now - t0) .. ")")
+        head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
         box_open("resource")
         box_line(fmt_res())
         box_close()
         print("")
 
         box_open("package")
-        box_line(string.format("%-20s %-13s %-5s %s", "package", "status", "ps", "rejoin"))
-        box_blank()
-        for _, name in ipairs(names) do
-            local s = st[name]; local p = cfg.pkgs[name]
-            local status
-            if s.halted then status = "halted"
-            elseif dis[name] then status = "code " .. dis[name].code
-            elseif pm[name] then status = "alive"
-            else status = "dead" end
-            local extra = s.halted and ("  " .. (s.halt_code or "")) or ""
-            box_line(string.format("%-20s %-13s %-5s %s%s",
-                cut(name, 20), status, "ps" .. (s.plist[s.pptr] or 1),
-                p.rejoin > 0 and (p.rejoin .. "s") or "off", extra))
+        if mode == "hopper" then
+            box_line(string.format("%-2s %-15s %-4s %-5s %-6s %-2s %s",
+                "#", "package", "ps", "join", "up", "hp", "st"))
+            box_blank()
+            for i, name in ipairs(names) do
+                local s = st[name]
+                local cur = s.plist[s.pptr] or 1
+                local mark
+                if s.halted then mark = "HALT " .. (s.halt_code or "")
+                elseif dis[name] then mark = "code " .. dis[name].code
+                elseif pm[name] then mark = "alive"
+                else mark = "dead" end
+                box_line(string.format("%-2d %-15s %-4s %-5s %-6s %-2d %s",
+                    i, cut(name, 15), "ps" .. cur,
+                    os.date("%H:%M", s.joined),
+                    fmt_elapsed(now - s.joined), s.hops, mark))
+            end
+        else
+            box_line(string.format("%-2s %-17s %-4s %-6s %s",
+                "#", "package", "ps", "up", "status"))
+            box_blank()
+            for i, name in ipairs(names) do
+                local s = st[name]
+                local cur = s.plist[s.pptr] or 1
+                local mark
+                if s.halted then mark = "halted " .. (s.halt_code or "")
+                elseif dis[name] then mark = "code " .. dis[name].code
+                elseif pm[name] then mark = "alive"
+                else mark = "dead" end
+                box_line(string.format("%-2d %-17s %-4s %-6s %s",
+                    i, cut(name, 17), "ps" .. cur,
+                    fmt_elapsed(now - s.joined), mark))
+            end
         end
         box_close()
         print("")
         col("90"); print("press y or Enter to stop & close all"); off()
 
         local k = read_key(1)
-        -- y or Enter => stop & force-stop all
         if k == "" or (k and k:lower() == "y") then quit = true; break end
 
         now = os.time()
@@ -809,20 +865,24 @@ screen_start = function(cfg)
                     else
                         hlog("disconnect " .. name .. " code " .. d.code .. " -> relaunch")
                         relaunch(s, p, cfg, name, "rejoin " .. d.code, false, now)
+                        s.joined = now
                     end
-                elseif p.rejoin > 0 and now >= s.rj_next then
-                    s.rj_next = now + p.rejoin
+                elseif mode == "hopper" and p.rejoin > 0 and now >= s.rj_next then
+                    s.rj_next = now + (p.rejoin * 60)
                     if #s.plist > 1 then
                         s.pptr = s.pptr + 1
                         if s.pptr > #s.plist then s.pptr = 1 end
                     end
-                    hlog("rejoin " .. name .. " (ps " .. (s.plist[s.pptr] or 1) .. ")")
-                    relaunch(s, p, cfg, name, "rejoin", true, now)
+                    hlog("hop " .. name .. " (ps " .. (s.plist[s.pptr] or 1) .. ")")
+                    relaunch(s, p, cfg, name, "hop", true, now)
+                    s.joined = now
+                    s.hops = s.hops + 1
                 elseif p.heartbeat > 0 and now >= s.hb_next then
                     s.hb_next = now + p.heartbeat
                     if not pm[name] then
                         hlog("heartbeat " .. name .. " dead -> relaunch")
                         relaunch(s, p, cfg, name, "dead", false, now)
+                        s.joined = now
                     end
                 end
             end
@@ -844,29 +904,29 @@ screen_start = function(cfg)
 end
 
 -- ---- REJOIN ----
-screen_rejoin = function(cfg)
+screen_rejoin = function(cfg, mode)
+    mode = mode or cfg.mode or "hopper"
     local note
     while true do
         local sel = selected_list(cfg)
-        head("Rejoin")
+        head("Rejoin [" .. mode .. "]")
         col("90"); print("delay " .. cfg.launch_delay .. "s"); off()
         print("")
         box_open("package")
         if #sel == 0 then
             box_line("(none selected -- set it in menu [4] Packages)")
         else
-            box_line(string.format("%-3s %-17s %-4s %-6s %-7s %s", "#", "package", "on", "beat", "rejoin", "ps"))
+            box_line(string.format("%-3s %-17s %-6s %-8s %s", "#", "package", "beat", "hop/min", "server"))
             box_blank()
             for i, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
-                box_line(string.format("%-3d %-17s %-4s %-6s %-7s ps%s",
-                    i, cut(name, 17), p.on == 1 and "x" or "-",
-                    p.heartbeat .. "s", p.rejoin > 0 and (p.rejoin .. "s") or "off", ps_label(p, cfg)))
+                box_line(string.format("%-3d %-17s %-6s %-8s ps%s",
+                    i, cut(name, 17),
+                    p.heartbeat .. "s", p.rejoin > 0 and (p.rejoin .. "m") or "off", ps_label(p, cfg)))
             end
         end
         box_close()
         print("")
-        print("  [number] - toggle on/off")
         print("  [e] - edit heartbeat / rejoin")
         print("  [p] - set private server (per package)")
         print("  [d] - set delay")
@@ -917,7 +977,7 @@ screen_rejoin = function(cfg)
                     io.write("heartbeat (seconds, 0=off)  [" .. p.heartbeat .. "] : "); io.flush()
                     local b = read_line(); b = b and trim(b) or ""
                     if b ~= "" then local bn = tonumber(b); if bn and bn >= 0 then p.heartbeat = bn end end
-                    io.write("rejoin    (seconds, 0=off)  [" .. p.rejoin .. "] : "); io.flush()
+                    io.write("hop/rejoin (minutes, 0=off)  [" .. p.rejoin .. "] : "); io.flush()
                     local e = read_line(); e = e and trim(e) or ""
                     if e ~= "" then local en = tonumber(e); if en and en >= 0 then p.rejoin = en end end
                     save_cfg(cfg)
@@ -925,12 +985,7 @@ screen_rejoin = function(cfg)
                 else note = "!invalid number" end
             end
         else
-            local n = tonumber(c)
-            if n and n >= 1 and n <= #sel then
-                local p = cfg.pkgs[sel[n]]
-                p.on = (p.on == 1) and 0 or 1
-                save_cfg(cfg)
-            else note = "!invalid choice" end
+            note = "!invalid choice"
         end
     end
 end
