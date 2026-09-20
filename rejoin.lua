@@ -15,26 +15,24 @@ local STOP_CODES  = { [267] = true, [600] = true }         -- ban: never rejoin
 local FAIL_LIMIT  = 3                                       -- relaunch failures
 local FAIL_WINDOW = 60                                      -- within this many seconds -> halt
 
--- lebar tampilan: ikut terminal apa adanya (jangan dipaksa lebar)
+-- lebar tampilan. stty size = paling andal (baca tty asli).
+-- fallback 50 seperti baseline (bukan 60) supaya tidak wrap di terminal sempit.
 local function detect_cols()
-    -- env override dulu
-    local env = os.getenv("LIMBO_WIDTH")
-    if env then local e = tonumber(env); if e and e >= 30 then return e end end
-    -- tput cols
-    local h = io.popen("tput cols 2>/dev/null")
-    local n
-    if h then n = tonumber(h:read("*l")); h:close() end
-    -- fallback: stty size (rows cols -> ambil cols)
-    if not n then
-        local h2 = io.popen("stty size < /dev/tty 2>/dev/null")
-        if h2 then
-            local s = h2:read("*l"); h2:close()
-            if s then n = tonumber(s:match("(%d+)%s*$")) end
-        end
+    local env = os.getenv("LIMBO_WIDTH") or os.getenv("COLUMNS")
+    if env then local e = tonumber(env); if e and e >= 20 then return e end end
+    local h = io.popen("stty size 2>/dev/null")
+    if h then
+        local t = h:read("*l"); h:close()
+        if t then local c = tonumber(t:match("(%d+)%s*$")); if c and c >= 20 then return c end end
     end
-    if not n or n < 30 then n = 60 end   -- hanya fallback kalau deteksi gagal total
-    if n > 120 then n = 120 end
-    return n
+    local h2 = io.popen("stty -F /dev/tty size 2>/dev/null")
+    if h2 then
+        local t = h2:read("*l"); h2:close()
+        if t then local c = tonumber(t:match("(%d+)%s*$")); if c and c >= 20 then return c end end
+    end
+    local h3 = io.popen("tput cols 2>/dev/null")
+    if h3 then local c = tonumber(h3:read("*l")); h3:close(); if c and c >= 20 then return c end end
+    return 50
 end
 local W  = detect_cols()
 local IN = W - 2
@@ -178,29 +176,25 @@ local function head(name)
     print("")
 end
 
+-- input: /dev/tty dulu (sama seperti baseline), fallback stdin
 local function read_line()
+    io.flush()
     local tty = io.open("/dev/tty", "r")
     local r
-    if tty then r = tty:read("*l"); tty:close() end
-    if r == nil then r = io.read("*l") end
+    if tty then r = tty:read("*l"); tty:close() else r = io.read("*l") end
+    if r == nil then sleep(2) end
     return r
 end
+
+-- single key: sama persis baseline
 local function read_key(t)
-    local sec = t or 1
-    -- method 1: bash read -n1 (works on normal Termux)
-    local h = io.popen("bash -c 'read -t " .. sec .. " -n 1 k < /dev/tty 2>/dev/null && echo \"$k\"' 2>/dev/null")
-    local k
-    if h then k = h:read("*l"); h:close() end
-    if k and k ~= "" then return k end
-    -- method 2: raw tty read (fallback)
-    os.execute("stty -F /dev/tty raw -echo min 0 time " .. (sec * 10) .. " 2>/dev/null")
-    local f = io.open("/dev/tty", "r")
-    if f then k = f:read(1); f:close() end
-    os.execute("stty -F /dev/tty sane 2>/dev/null")
-    if k == "" then k = nil end
-    return k
+    local h = io.popen("bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null && echo $k' 2>/dev/null")
+    if not h then sleep(t or 1); return nil end
+    local k = h:read("*l"); h:close()
+    return (k and k ~= "") and k or nil
 end
 
+-- prompt input dengan pesan (opsional). "!" prefix = error (merah), lain = ok (hijau)
 local function prompt(note, label)
     if note then
         if note:sub(1, 1) == "!" then col("31"); print(note:sub(2)); off()
