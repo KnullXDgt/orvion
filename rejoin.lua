@@ -177,12 +177,15 @@ local function head(name)
 end
 
 -- input: /dev/tty dulu (sama seperti baseline), fallback stdin
+-- read a line: stdin first (it IS the keyboard when running `lua file.lua`),
+-- /dev/tty only as fallback (avoids double-read race on a real terminal).
 local function read_line()
     io.flush()
-    local tty = io.open("/dev/tty", "r")
-    local r
-    if tty then r = tty:read("*l"); tty:close() else r = io.read("*l") end
-    if r == nil then sleep(2) end
+    local r = io.read("*l")
+    if r == nil then
+        local tty = io.open("/dev/tty", "r")
+        if tty then r = tty:read("*l"); tty:close() end
+    end
     return r
 end
 
@@ -215,13 +218,13 @@ end
 -- SYSTEM (root)
 -- ============================================================
 local function su_cmd(cmd)
-    local h = io.popen("su -c '" .. cmd:gsub("'", "'\\''") .. "' 2>&1")
+    local h = io.popen("su -c '" .. cmd:gsub("'", "'\\''") .. "' </dev/null 2>&1")
     if not h then return "" end
     local r = h:read("*a"); h:close()
     return strip(r or "")
 end
 local function su_exec(cmd)
-    os.execute("su -c '" .. cmd:gsub("'", "'\\''") .. "' >/dev/null 2>&1")
+    os.execute("su -c '" .. cmd:gsub("'", "'\\''") .. "' </dev/null >/dev/null 2>&1")
 end
 local function hlog(msg)
     local f = io.open(LOG_FILE, "a")
@@ -336,11 +339,11 @@ local function all_packages()
     local h = io.popen("pm list packages 2>/dev/null")
     if h then add(parse_pkg_lines(h:read("*a") or ""), "pm"); h:close() end
     -- 2) su pm (covers clone/hidden apps)
-    local h2 = io.popen("su -c 'pm list packages' 2>/dev/null")
+    local h2 = io.popen("su -c 'pm list packages' </dev/null 2>/dev/null")
     if h2 then add(parse_pkg_lines(h2:read("*a") or ""), "su"); h2:close() end
     -- 3) last resort: full path via su
     if #out == 0 then
-        local h3 = io.popen("su -c '/system/bin/pm list packages' 2>/dev/null")
+        local h3 = io.popen("su -c '/system/bin/pm list packages' </dev/null 2>/dev/null")
         if h3 then add(parse_pkg_lines(h3:read("*a") or ""), "su-path"); h3:close() end
     end
     table.sort(out)
