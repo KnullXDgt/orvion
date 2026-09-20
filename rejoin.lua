@@ -52,7 +52,7 @@ end
 
 local function load_cfg()
     local cfg = {
-        launch_delay = 10, margin = 24,
+        launch_delay = 10,
         place_id = "", autoexec_path = "", autoexec_script = "",
         prefix = DEF_PREFIX, ps = {}, pkgs = {},
     }
@@ -68,7 +68,6 @@ local function load_cfg()
                 if k == "prefix" then
                     if v ~= "" then cfg.prefix = v end
                 elseif k == "launch_delay" then cfg.launch_delay = tonumber(v) or cfg.launch_delay
-                elseif k == "margin" then cfg.margin = tonumber(v) or cfg.margin
                 elseif k == "place_id" then cfg.place_id = v
                 elseif k == "autoexec_path" then cfg.autoexec_path = v
                 elseif k == "autoexec_script" then cfg.autoexec_script = v
@@ -98,7 +97,6 @@ local function save_cfg(cfg)
     if not f then return false end
     f:write("# Limbo Rejoin -- editable by hand or via menu\n")
     f:write("launch_delay=" .. cfg.launch_delay .. "\n")
-    f:write("margin=" .. cfg.margin .. "\n")
     f:write("place_id=" .. cfg.place_id .. "\n")
     f:write("autoexec_path=" .. cfg.autoexec_path .. "\n")
     f:write("autoexec_script=" .. cfg.autoexec_script .. "\n")
@@ -451,11 +449,12 @@ local function apply_layout(pkg, L, T, R, B)
     su_exec("chmod 444 " .. pref)
 end
 
-local function grid_bounds(i, n, sw, sh, off, margin)
-    if n <= 1 then return margin, off + margin, sw - margin, sh - margin end
+-- exactly like baseline: n==1 fullscreen, else equal rows offset by status bar
+local function grid_bounds(i, n, sw, sh, off)
+    if n == 1 then return 0, 0, sw, sh end
     local gh = math.floor((sh - off) / n)
     local row = i - 1
-    return margin, (row * gh) + off + margin, sw - margin, ((row + 1) * gh) + off - margin
+    return 0, (row * gh) + off, sw, ((row + 1) * gh) + off
 end
 
 -- ============================================================
@@ -653,7 +652,7 @@ screen_start = function(cfg)
     local t0 = os.time()
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
-        local L, T, R, B = grid_bounds(i, #names, sw, sh, off_, cfg.margin)
+        local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
         apply_layout(name, L, T, R, B)
         local plist = ps_list_of(p, cfg)
         launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start")
@@ -1020,28 +1019,22 @@ screen_layout = function(cfg)
         head("Layout")
         box_open("info")
         box_line("screen   " .. (sw and (sw .. " x " .. sh) or "?") .. "     offset   " .. off_)
-        box_line("margin   " .. cfg.margin .. " px")
         box_close()
         print("")
-        print("  [1] - set margin")
-        print("  [2] - apply layout")
+        print("  [1] - apply layout")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
         if c == "1" then
-            local n = tonumber(prompt(nil, "margin px"))
-            if n and n >= 0 and n <= 500 then cfg.margin = n; save_cfg(cfg); note = "margin " .. n .. "px"
-            else note = "!number 0-500" end
-        elseif c == "2" then
             local sel = selected_list(cfg)
             if #sel == 0 or not sw then note = "!no package / failed to read screen"
             else
                 head("Layout  >  apply")
                 box_open("result")
                 for i, name in ipairs(sel) do
-                    local L, T, R, B = grid_bounds(i, #sel, sw, sh, off_, cfg.margin)
+                    local L, T, R, B = grid_bounds(i, #sel, sw, sh, off_)
                     apply_layout(name, L, T, R, B)
                     box_line(string.format("%-18s L%-5d T%-5d R%-5d B%d", cut(name, 18), L, T, R, B))
                 end
