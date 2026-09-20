@@ -354,9 +354,9 @@ local function scan_state(names)
     local pm, dis = {}, {}
     if #names == 0 then return pm, dis end
     local cmd = "for p in " .. table.concat(names, " ") .. "; do echo \"P $p=$(pidof $p)\"; done; " ..
-        "logcat -d -t 80 -s Roblox 2>/dev/null | grep -aF 'disconnect with reason' | tail -20"
+        "logcat -d -t 150 -s Roblox 2>/dev/null | grep -aE 'disconnect with reason|userid:' | tail -40"
     local out = su_cmd(cmd)
-    if out == "" then return pm, dis end
+    if out == "" then return pm, dis, {} end
 
     local pid2pkg = {}
     local loglines = {}
@@ -368,46 +368,60 @@ local function scan_state(names)
             table.insert(loglines, line)
         end
     end
+    local uid = {}   -- pkg -> roblox userid
     for _, line in ipairs(loglines) do
         local pid  = line:match("^%d+-%d+%s+%d+:%d+:%d+%.%d+%s+(%d+)")
         local code = line:match("reason:%s*(%d+)")
         local key  = line:match("(%d%d%d%d%-%d%d%-%d%dT[%d:%.]+Z)")
-        if pid and code then
-            local pkg = pid2pkg[tonumber(pid)]
-            if pkg then dis[pkg] = { code = tonumber(code), key = key or line } end
+        local u    = line:match("userid:%s*(%d+)")
+        local pkg  = pid and pid2pkg[tonumber(pid)]
+        if pkg then
+            if code then dis[pkg] = { code = tonumber(code), key = key or line } end
+            if u then uid[pkg] = u end
         end
     end
-    return pm, dis
+    return pm, dis, uid
 end
 
--- username per package, parsed from the Roblox log (cached, light)
-local _users, _users_t = {}, 0
-local function user_map(pm)
-    local pid2pkg = {}
-    for pkg, pid in pairs(pm) do pid2pkg[pid] = pkg end
-    if next(pid2pkg) == nil then return {} end
-    local out = su_cmd("logcat -d -t 3000 -s Roblox 2>/dev/null | grep -aiE 'username|displayname' | tail -40")
-    local res = {}
-    for line in out:gmatch("[^\n]+") do
-        local pid  = line:match("^%d+-%d+%s+%d+:%d+:%d+%.%d+%s+(%d+)")
-        local user = line:match('[Uu]ser[Nn]ame"?%s*[:=]%s*"?([%w_]+)')
-                  or line:match('[Dd]isplay[Nn]ame"?%s*[:=]%s*"([^"]+)"')
-        if pid and user then
-            local pkg = pid2pkg[tonumber(pid)]
-            if pkg and not res[pkg] then res[pkg] = user end
-        end
+-- resolve roblox userid -> username via public API (batch, cached forever)
+local _uname = {}
+local function resolve_names(ids)
+    local need = {}
+    for _, id in ipairs(ids) do
+        if id and id ~= "" and not _uname[id] then table.insert(need, id) end
     end
+    if #need > 0 then
+        local payload = '{"userIds":[' .. table.concat(need, ",") .. ']}'
+        local cmd = "curl -s -m 5 -X POST 'https://users.roblox.com/v1/users' " ..
+            "-H 'Content-Type: application/json' -d '" .. payload .. "' 2>/dev/null"
+        local h = io.popen(cmd)
+        local out = h and h:read("*a") or ""
+        if h then h:close() end
+        for id, name in out:gmatch('"id":(%d+),"name":"([^"]+)"') do _uname[id] = name end
+    end
+    local res = {}
+    for _, id in ipairs(ids) do res[id] = id and _uname[id] or nil end
     return res
 end
 
--- cached pids + usernames for menu display (1 su call / 20s)
+-- cached pids + usernames for menu display (1 su call / 20s, 1 http / rarely)
 local _info = { t = 0, pm = {}, users = {} }
 local function pkg_info(names)
     local now = os.time()
     if now - _info.t >= 20 then
-        _info.pm = scan_state(names)
-        _info.users = user_map(_info.pm)
-        _info.t = now
+        local pm, _, uid = scan_state(names)
+        local ids = {}
+        for _, name in ipairs(names) do
+            local id = uid[name]
+            if id then table.insert(ids, id) end
+        end
+        local by_id = resolve_names(ids)
+        local users = {}
+        for _, name in ipairs(names) do
+            local id = uid[name]
+            if id and by_id[id] then users[name] = by_id[id] end
+        end
+        _info.pm, _info.users, _info.t = pm, users, now
     end
     return _info.pm, _info.users
 end
