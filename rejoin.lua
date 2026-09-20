@@ -72,7 +72,7 @@ local function load_cfg()
                             on        = tonumber(fl[3]) or 1,
                             heartbeat = tonumber(fl[4]) or 10,
                             rejoin    = tonumber(fl[5]) or 0,
-                            ps_index  = tonumber(fl[6]) or 1,
+                            ps       = trim(fl[6] or ""),
                         }
                     end
                 end
@@ -96,7 +96,7 @@ local function save_cfg(cfg)
     f:write("prefix=" .. cfg.prefix .. "\n")
     for name, p in pairs(cfg.pkgs) do
         f:write(string.format("pkg=%s,%d,%d,%d,%d,%d\n",
-            name, p.selected, p.on, p.heartbeat, p.rejoin, p.ps_index))
+            name, p.selected, p.on, p.heartbeat, p.rejoin, p.ps))
     end
     f:close()
     return true
@@ -482,7 +482,7 @@ local function selected_list(cfg)
     table.sort(out); return out
 end
 local function ensure_pkg(cfg, name)
-    cfg.pkgs[name] = cfg.pkgs[name] or { selected = 1, on = 1, heartbeat = 10, rejoin = 0, ps_index = 1 }
+    cfg.pkgs[name] = cfg.pkgs[name] or { selected = 1, on = 1, heartbeat = 10, rejoin = 0, ps = "" }
     return cfg.pkgs[name]
 end
 
@@ -501,6 +501,26 @@ local function parse_range(input, max)
         if v and v >= 1 and v <= max and not seen[v] then table.insert(sel, v); seen[v] = true end
     end
     return sel
+end
+
+-- resolve a package's assigned PS indexes. "" or invalid => all servers
+local function ps_list_of(p, cfg)
+    local idxs = parse_range(p.ps or "", #cfg.ps)
+    if #idxs == 0 then
+        for i = 1, #cfg.ps do table.insert(idxs, i) end
+    end
+    return idxs
+end
+
+-- short label for the ps column, e.g. "all" or "1,2" or "1-3"
+local function ps_label(p, cfg)
+    local idxs = ps_list_of(p, cfg)
+    if #idxs == 0 then return "?" end
+    if #idxs == 1 then return tostring(idxs[1]) end
+    local contiguous = true
+    for i = 2, #idxs do if idxs[i] ~= idxs[i-1] + 1 then contiguous = false end end
+    if contiguous then return idxs[1] .. "-" .. idxs[#idxs] end
+    return table.concat(idxs, ",")
 end
 
 local function fmt_res()
@@ -535,8 +555,10 @@ local function screen_menu(cfg)
             for _, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
                 local usr = users[name] and (users[name].username or users[name].display)
-                local u = usr and (" (" .. cut(usr, 16) .. ")") or ""
-                box_line(string.format("%-24s%s", cut(name, 24), u))
+                local u = usr and (" (" .. cut(usr, 14) .. ")") or ""
+                local srv = " [Server" .. ps_label(p, cfg) .. "]"
+                local line = cut(name, 18) .. u .. srv
+                box_line(line)
             end
         end
         box_close()
@@ -573,8 +595,8 @@ end
 
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
 local function relaunch(s, p, cfg, name, reason, scheduled, now)
-    local ps_url = cfg.ps[s.ps_index] or cfg.ps[1] or ""
-    launch(name, ps_url, cfg.place_id, reason)
+    local pi = (s.plist and s.plist[s.pptr]) or 1
+    launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
     s.status = reason
     if not scheduled then
         table.insert(s.fails, now)
@@ -615,13 +637,14 @@ screen_start = function(cfg)
         local p = cfg.pkgs[name]
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_, cfg.margin)
         apply_layout(name, L, T, R, B)
-        local ps_url = cfg.ps[p.ps_index] or cfg.ps[1] or ""
-        launch(name, ps_url, cfg.place_id, "start")
+        local plist = ps_list_of(p, cfg)
+        launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start")
         st[name] = {
             hb_next = os.time() + p.heartbeat,
             rj_next = os.time() + p.rejoin,
             status = "rejoin",
-            ps_index = p.ps_index,
+            plist = plist,
+            pptr = 1,
             halted = false, halt_code = nil,
             fails = {},
             disc_key = nil,
@@ -658,7 +681,7 @@ screen_start = function(cfg)
             else status = "dead" end
             local extra = s.halted and ("  " .. (s.halt_code or "")) or ""
             box_line(string.format("%-20s %-13s %-5s %s%s",
-                cut(name, 20), status, "ps" .. s.ps_index,
+                cut(name, 20), status, "ps" .. (s.plist[s.pptr] or 1),
                 p.rejoin > 0 and (p.rejoin .. "s") or "off", extra))
         end
         box_close()
@@ -687,11 +710,11 @@ screen_start = function(cfg)
                     end
                 elseif p.rejoin > 0 and now >= s.rj_next then
                     s.rj_next = now + p.rejoin
-                    if #cfg.ps > 1 then
-                        s.ps_index = s.ps_index + 1
-                        if s.ps_index > #cfg.ps then s.ps_index = 1 end
+                    if #s.plist > 1 then
+                        s.pptr = s.pptr + 1
+                        if s.pptr > #s.plist then s.pptr = 1 end
                     end
-                    hlog("rejoin " .. name .. " (ps " .. s.ps_index .. ")")
+                    hlog("rejoin " .. name .. " (ps " .. (s.plist[s.pptr] or 1) .. ")")
                     relaunch(s, p, cfg, name, "rejoin", true, now)
                 elseif p.heartbeat > 0 and now >= s.hb_next then
                     s.hb_next = now + p.heartbeat
@@ -730,26 +753,49 @@ screen_rejoin = function(cfg)
         if #sel == 0 then
             box_line("(none selected -- set it in menu [4] Packages)")
         else
-            box_line(string.format("%-3s %-20s %-4s %-10s %s", "#", "package", "on", "heartbeat", "rejoin"))
+            box_line(string.format("%-3s %-17s %-4s %-6s %-7s %s", "#", "package", "on", "beat", "rejoin", "ps"))
             box_blank()
             for i, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
-                box_line(string.format("%-3d %-20s %-4s %-10s %s",
-                    i, cut(name, 20), p.on == 1 and "x" or "-",
-                    p.heartbeat .. "s", p.rejoin > 0 and (p.rejoin .. "s") or "off"))
+                box_line(string.format("%-3d %-17s %-4s %-6s %-7s ps%d",
+                    i, cut(name, 17), p.on == 1 and "x" or "-",
+                    p.heartbeat .. "s", p.rejoin > 0 and (p.rejoin .. "s") or "off", ps_label(p, cfg)))
             end
         end
         box_close()
         print("")
         print("  [number] - toggle on/off")
         print("  [e] - edit heartbeat / rejoin")
+        print("  [p] - set private server (per package)")
         print("  [d] - set delay")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
-        if c:lower() == "d" then
+        if c:lower() == "p" then
+            if #sel == 0 then note = "!no package selected"
+            elseif #cfg.ps == 0 then note = "!no private server saved"
+            else
+                head("Rejoin  >  set ps")
+                box_open("private server")
+                for i, u in ipairs(cfg.ps) do box_line(string.format("%-3d %s", i, cut(u, IN - 7))) end
+                box_close()
+                print("")
+                local n = tonumber(prompt(nil, "package number"))
+                if n and n >= 1 and n <= #sel then
+                    local name = sel[n]
+                    local r = prompt(nil, "ps (1,2 / 1-3 / empty=all)")
+                    if r ~= nil then
+                        local idxs = parse_range(r, #cfg.ps)
+                        if r == "" or #idxs > 0 then
+                            cfg.pkgs[name].ps = (r == "") and "" or r; save_cfg(cfg)
+                            note = name .. " -> " .. (r == "" and "all" or r)
+                        else note = "!invalid ps range" end
+                    end
+                else note = "!invalid number" end
+            end
+        elseif c:lower() == "d" then
             local n = tonumber(prompt(nil, "delay seconds"))
             if n and n >= 0 then cfg.launch_delay = n; save_cfg(cfg); note = "delay " .. n .. "s"
             else note = "!invalid number" end
@@ -833,12 +879,14 @@ screen_packages = function(cfg)
         else
             for i, p in ipairs(det) do
                 local e = cfg.pkgs[p]
-                box_line(string.format("[%s] %-3d %s", (e and e.selected == 1) and "x" or " ", i, p))
+                local srv = e and ("  [Server" .. ps_label(e, cfg) .. "]") or ""
+                box_line(string.format("[%s] %-3d %-20s%s", (e and e.selected == 1) and "x" or " ", i, cut(p, 20), srv))
             end
         end
         box_close()
         print("")
         print("  [1,2,3] or [1-10] - select these")
+        print("  [s] - set server for a package")
         print("  [a] - select all")
         print("  [n] - select none")
         print("  [0] - Back")
@@ -846,7 +894,30 @@ screen_packages = function(cfg)
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
-        if c:lower() == "a" then
+        if c:lower() == "s" then
+            if #det == 0 then note = "!no package"
+            elseif #cfg.ps == 0 then note = "!no server saved (menu 5)"
+            else
+                head("Packages  >  set server")
+                box_open("server list")
+                for i, u in ipairs(cfg.ps) do box_line(string.format("%-3d %s", i, cut(u, IN - 7))) end
+                box_close()
+                print("")
+                local n = tonumber(prompt(nil, "package number"))
+                if n and n >= 1 and n <= #det then
+                    local name = det[n]
+                    local r = prompt(nil, "server (1 / 1,2 / 1-3 / empty=all)")
+                    if r ~= nil then
+                        local idxs = parse_range(r, #cfg.ps)
+                        if r == "" or #idxs > 0 then
+                            ensure_pkg(cfg, name).ps = (r == "") and "" or r
+                            save_cfg(cfg)
+                            note = cut(name, 20) .. " -> " .. (r == "" and "all" or r)
+                        else note = "!invalid server range" end
+                    end
+                else note = "!invalid number" end
+            end
+        elseif c:lower() == "a" then
             for _, p in ipairs(det) do ensure_pkg(cfg, p).selected = 1 end
             save_cfg(cfg); note = "all selected"
         elseif c:lower() == "n" then
