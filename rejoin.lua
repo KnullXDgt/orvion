@@ -15,17 +15,28 @@ local STOP_CODES  = { [267] = true, [600] = true }         -- ban: never rejoin
 local FAIL_LIMIT  = 3                                       -- relaunch failures
 local FAIL_WINDOW = 60                                      -- within this many seconds -> halt
 
--- lebar tampilan: ikut terminal, fallback 60
-local function term_cols()
-    local h = io.popen("tput cols 2>/dev/null || stty size < /dev/tty 2>/dev/null | awk '{print $2}'")
-    local v
-    if h then v = h:read("*l"); h:close() end
-    local n = tonumber(v)
-    if not n or n < 56 then n = 60 end
-    if n > 110 then n = 110 end
+-- lebar tampilan: ikut terminal apa adanya (jangan dipaksa lebar)
+local function detect_cols()
+    -- env override dulu
+    local env = os.getenv("LIMBO_WIDTH")
+    if env then local e = tonumber(env); if e and e >= 30 then return e end end
+    -- tput cols
+    local h = io.popen("tput cols 2>/dev/null")
+    local n
+    if h then n = tonumber(h:read("*l")); h:close() end
+    -- fallback: stty size (rows cols -> ambil cols)
+    if not n then
+        local h2 = io.popen("stty size < /dev/tty 2>/dev/null")
+        if h2 then
+            local s = h2:read("*l"); h2:close()
+            if s then n = tonumber(s:match("(%d+)%s*$")) end
+        end
+    end
+    if not n or n < 30 then n = 60 end   -- hanya fallback kalau deteksi gagal total
+    if n > 120 then n = 120 end
     return n
 end
-local W  = term_cols()
+local W  = detect_cols()
 local IN = W - 2
 
 -- ============================================================
@@ -52,9 +63,9 @@ local function load_cfg()
         return cfg, false
     end
     for line in f:lines() do
-        line = trim(line)
-        if line ~= "" and not line:match("^#") then
-            local k, v = line:match("^([%w_]+)%s*=%s*(.*)$")
+        local lv = trim(line)
+        if lv ~= "" and not lv:match("^#") then
+            local k, v = lv:match("^([%w_]+)%s*=%s*(.*)$")
             if k then
                 if k == "prefix" then
                     if v ~= "" then cfg.prefix = v end
@@ -108,8 +119,8 @@ local function load_ps(cfg)
     if not f then return end
     cfg.ps = {}
     for line in f:lines() do
-        line = trim(line)
-        if line ~= "" then table.insert(cfg.ps, line) end
+        local lv = trim(line)
+        if lv ~= "" then table.insert(cfg.ps, lv) end
     end
     f:close()
 end
@@ -131,53 +142,63 @@ local function off() io.write("\27[0m"); io.flush() end
 local function cls() io.write("\27[2J\27[3J\27[H\27[0m"); io.flush() end
 local function strip(s) return (s:gsub("\27%[[%d;]*m", "")) end
 
+-- display width: ASCII only now, so #s is exact
 local function uw(s)
-    s = strip(s)
-    local n = 0
-    for _ in s:gmatch("[%z\1-\127\194-\244][\128-\191]*") do n = n + 1 end
-    return n
+    return #strip(s)
 end
 local function pad(s, w)
-    local d = w - uw(s)
+    s = s or ""
+    local d = w - #s
     if d > 0 then return s .. string.rep(" ", d) end
+    if d < 0 then return s:sub(1, w) end
     return s
 end
 local function cut(s, m)
     if not s then return "-" end
-    if uw(s) <= m then return s end
+    if #s <= m then return s end
     return m > 2 and (s:sub(1, m - 2) .. "..") or s:sub(1, m)
 end
 
--- box: title INSIDE, no border-breaking separator
+-- box: plain ASCII borders (safe on any terminal / font width)
 local function box_open(title)
-    print("┌" .. string.rep("─", IN) .. "┐")
+    print("+" .. string.rep("-", IN) .. "+")
     if title and title ~= "" then
-        col("1;36"); io.write("│ " .. pad(title:upper(), IN - 2) .. " │"); off(); print("")
+        col("1;36"); io.write("| " .. pad(title:upper(), IN - 2) .. " |"); off(); print("")
     end
 end
-local function box_line(t) print("│ " .. pad(t or "", IN - 2) .. " │") end
-local function box_blank() print("│ " .. string.rep(" ", IN - 2) .. " │") end
-local function box_close() print("└" .. string.rep("─", IN) .. "┘") end
+local function box_line(t) print("| " .. pad(t or "", IN - 2) .. " |") end
+local function box_blank() print("| " .. string.rep(" ", IN - 2) .. " |") end
+local function box_close() print("+" .. string.rep("-", IN) .. "+") end
 
 local function head(name)
     cls()
-    print("┌" .. string.rep("─", IN) .. "┐")
-    col("1;36"); io.write("│ " .. pad("Limbo  >  " .. name, IN - 2) .. " │"); off(); print("")
-    print("└" .. string.rep("─", IN) .. "┘")
+    print("+" .. string.rep("-", IN) .. "+")
+    col("1;36"); io.write("| " .. pad("Limbo  >  " .. name, IN - 2) .. " |"); off(); print("")
+    print("+" .. string.rep("-", IN) .. "+")
     print("")
 end
 
 local function read_line()
     local tty = io.open("/dev/tty", "r")
     local r
-    if tty then r = tty:read("*l"); tty:close() else r = io.read("*l") end
+    if tty then r = tty:read("*l"); tty:close() end
+    if r == nil then r = io.read("*l") end
     return r
 end
 local function read_key(t)
-    local h = io.popen("bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null && echo $k' 2>/dev/null")
-    if not h then sleep(t or 1); return nil end
-    local k = h:read("*l"); h:close()
-    return (k and k ~= "") and k or nil
+    local sec = t or 1
+    -- method 1: bash read -n1 (works on normal Termux)
+    local h = io.popen("bash -c 'read -t " .. sec .. " -n 1 k < /dev/tty 2>/dev/null && echo \"$k\"' 2>/dev/null")
+    local k
+    if h then k = h:read("*l"); h:close() end
+    if k and k ~= "" then return k end
+    -- method 2: raw tty read (fallback)
+    os.execute("stty -F /dev/tty raw -echo min 0 time " .. (sec * 10) .. " 2>/dev/null")
+    local f = io.open("/dev/tty", "r")
+    if f then k = f:read(1); f:close() end
+    os.execute("stty -F /dev/tty sane 2>/dev/null")
+    if k == "" then k = nil end
+    return k
 end
 
 local function prompt(note, label)
