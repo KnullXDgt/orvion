@@ -354,7 +354,7 @@ local function scan_state(names)
     local pm, dis = {}, {}
     if #names == 0 then return pm, dis end
     local cmd = "for p in " .. table.concat(names, " ") .. "; do echo \"P $p=$(pidof $p)\"; done; " ..
-        "logcat -d -t 150 -s Roblox 2>/dev/null | grep -aE 'disconnect with reason|userid:' | tail -40"
+        "logcat -d -t 2000 -s Roblox 2>/dev/null | grep -aE 'disconnect with reason|game_join_loadtime' | tail -60"
     local out = su_cmd(cmd)
     if out == "" then return pm, dis, {} end
 
@@ -383,47 +383,37 @@ local function scan_state(names)
     return pm, dis, uid
 end
 
--- resolve roblox userid -> username via public API (batch, cached forever)
-local _uname = {}
-local function resolve_names(ids)
-    local need = {}
-    for _, id in ipairs(ids) do
-        if id and id ~= "" and not _uname[id] then table.insert(need, id) end
+-- username per package: read from each clone's prefs.xml (root). Always present.
+local function read_usernames(names)
+    if #names == 0 then return {} end
+    local parts = {}
+    for _, pk in ipairs(names) do
+        local cmd = 'f=/data/data/' .. pk .. '/shared_prefs/prefs.xml; if [ -f "$f" ]; then '
+        cmd = cmd .. 'u=$(sed -n ' .. "'" .. 's/.*name="username">\\([^<]*\\)<.*/\\1/p' .. "'" .. ' "$f" | head -1); '
+        cmd = cmd .. 'd=$(sed -n ' .. "'" .. 's/.*name="displayName">\\([^<]*\\)<.*/\\1/p' .. "'" .. ' "$f" | head -1); '
+        cmd = cmd .. 'echo "U ' .. pk .. '|$u|$d"; fi'
+        parts[#parts + 1] = cmd
     end
-    if #need > 0 then
-        local payload = '{"userIds":[' .. table.concat(need, ",") .. ']}'
-        local cmd = "curl -s -m 5 -X POST 'https://users.roblox.com/v1/users' " ..
-            "-H 'Content-Type: application/json' -d '" .. payload .. "' 2>/dev/null"
-        local h = io.popen(cmd)
-        local out = h and h:read("*a") or ""
-        if h then h:close() end
-        for id, name in out:gmatch('"id":(%d+),"name":"([^"]+)"') do _uname[id] = name end
-    end
+    local out = su_cmd(table.concat(parts, '; '))
     local res = {}
-    for _, id in ipairs(ids) do res[id] = id and _uname[id] or nil end
+    for line in out:gmatch("[^\n]+") do
+        local pk, u, d = line:match("^U ([^|]+)|([^|]*)|(.*)$")
+        if pk then
+            res[pk] = { username = (u ~= "" and u or nil), display = (d ~= "" and d or nil) }
+        end
+    end
     return res
 end
 
--- cached pids + usernames for menu display (1 su call / 20s, 1 http / rarely)
-local _info = { t = 0, pm = {}, users = {} }
-local function pkg_info(names)
+-- cached usernames for menu display (1 su call / 20s)
+local _info = { t = 0, users = {} }
+local function user_info(names)
     local now = os.time()
     if now - _info.t >= 20 then
-        local pm, _, uid = scan_state(names)
-        local ids = {}
-        for _, name in ipairs(names) do
-            local id = uid[name]
-            if id then table.insert(ids, id) end
-        end
-        local by_id = resolve_names(ids)
-        local users = {}
-        for _, name in ipairs(names) do
-            local id = uid[name]
-            if id and by_id[id] then users[name] = by_id[id] end
-        end
-        _info.pm, _info.users, _info.t = pm, users, now
+        _info.users = read_usernames(names)
+        _info.t = now
     end
-    return _info.pm, _info.users
+    return _info.users
 end
 
 -- ============================================================
@@ -541,10 +531,11 @@ local function screen_menu(cfg)
         if #sel == 0 then
             box_line("(none -- open [4] Packages to pick)")
         else
-            local _, users = pkg_info(sel)
+            local users = user_info(sel)
             for _, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
-                local u = users[name] and (" (" .. cut(users[name], 14) .. ")") or ""
+                local usr = users[name] and (users[name].username or users[name].display)
+                local u = usr and (" (" .. cut(usr, 16) .. ")") or ""
                 box_line(string.format("%-24s%s", cut(name, 24), u))
             end
         end
