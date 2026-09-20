@@ -75,12 +75,16 @@ local function load_cfg()
                     local fl = split(v, ",")
                     local name = trim(fl[1] or "")
                     if name ~= "" then
+                        -- ps is field 6+ joined back (it may contain commas -> saved as ';')
+                        local ps_parts = {}
+                        for i = 6, #fl do table.insert(ps_parts, fl[i]) end
+                        local ps_val = table.concat(ps_parts, ","):gsub(";", ",")
                         cfg.pkgs[name] = {
                             selected  = tonumber(fl[2]) or 1,
                             on        = tonumber(fl[3]) or 1,
                             heartbeat = tonumber(fl[4]) or 10,
                             rejoin    = tonumber(fl[5]) or 0,
-                            ps       = trim(fl[6] or ""),
+                            ps        = trim(ps_val),
                         }
                     end
                 end
@@ -102,8 +106,9 @@ local function save_cfg(cfg)
     f:write("autoexec_script=" .. cfg.autoexec_script .. "\n")
     f:write("prefix=" .. cfg.prefix .. "\n")
     for name, p in pairs(cfg.pkgs) do
-        f:write(string.format("pkg=%s,%d,%d,%d,%d,%d\n",
-            name, p.selected, p.on, p.heartbeat, p.rejoin, p.ps))
+        local ps_str = (p.ps or ""):gsub(",", ";")
+        f:write(string.format("pkg=%s,%d,%d,%d,%d,%s\n",
+            name, p.selected, p.on, p.heartbeat, p.rejoin, ps_str))
     end
     f:close()
     return true
@@ -809,7 +814,7 @@ screen_rejoin = function(cfg)
             box_blank()
             for i, name in ipairs(sel) do
                 local p = cfg.pkgs[name]
-                box_line(string.format("%-3d %-17s %-4s %-6s %-7s ps%d",
+                box_line(string.format("%-3d %-17s %-4s %-6s %-7s ps%s",
                     i, cut(name, 17), p.on == 1 and "x" or "-",
                     p.heartbeat .. "s", p.rejoin > 0 and (p.rejoin .. "s") or "off", ps_label(p, cfg)))
             end
