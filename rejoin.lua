@@ -524,19 +524,64 @@ local function is_all_input(r)
     return l == "" or l == "all" or l == "a" or l == "*" or l == "semua" or l == "-"
 end
 
+-- parse user input into a sorted unique list of server indexes.
+-- Accepts: "1" | "1,4,7" | "1-5" | "1-3,7,10-12" | "1 2 3" | "2 - 7" | "1;4;7"
 local function parse_range(input, max)
     local sel, seen = {}, {}
-    local a, b = input:match("^(%d+)%s*%-%s*(%d+)$")
-    if a and b then
-        for i = tonumber(a), tonumber(b) do
-            if i >= 1 and i <= max and not seen[i] then table.insert(sel, i); seen[i] = true end
+    local function add(v)
+        v = tonumber(v)
+        if v and v >= 1 and v <= max and not seen[v] then
+            seen[v] = true; table.insert(sel, v)
         end
-        return sel
     end
-    for n in input:gmatch("(%d+)") do
-        local v = tonumber(n)
-        if v and v >= 1 and v <= max and not seen[v] then table.insert(sel, v); seen[v] = true end
+
+    local str = tostring(input)
+    -- 1) expand every explicit range first (allows spaces around the dash)
+    for a, b in str:gmatch("(%d+)%s*%-%s*(%d+)") do
+        local lo, hi = tonumber(a), tonumber(b)
+        if lo > hi then lo, hi = hi, lo end
+        for i = lo, hi do add(i) end
     end
+    -- 2) strip the ranges out, then take remaining lone numbers
+    local rest = str:gsub("%d+%s*%-%s*%d+", " ")
+    for n in rest:gmatch("(%d+)") do add(n) end
+
+    table.sort(sel)
+    return sel
+end
+
+-- true if the input means "all servers" (empty, all, a, *, -1)
+local function is_all_input(r)
+    if r == nil then return false end
+    local l = r:lower():gsub("%s", "")
+    return l == "" or l == "all" or l == "a" or l == "*" or l == "semua" or l == "-"
+end
+
+-- parse "1" / "1,4,7" / "1-5" / "1-3,7,10-12" / "1 2 3" into a sorted unique list.
+-- Ranges may appear anywhere in the string.
+local function parse_range(input, max)
+    local sel, seen = {}, {}
+    local function add(v)
+        v = tonumber(v)
+        if v and v >= 1 and v <= max and not seen[v] then
+            seen[v] = true; table.insert(sel, v)
+        end
+    end
+    -- normalise: strip spaces so "2 - 7" and "2-7" behave the same
+    local norm = tostring(input):gsub("%s+", "")
+    -- walk the string: each token is either "A-B" (range) or "A" (single)
+    for tok in norm:gmatch("[^,;]+") do
+        local a, b = tok:match("^(%d+)%s*%-%s*(%d+)$")
+        if a and b then
+            local lo, hi = tonumber(a), tonumber(b)
+            if lo > hi then lo, hi = hi, lo end
+            for i = lo, hi do add(i) end
+        else
+            -- token may still contain digits (e.g. "3abc") -> take the number
+            for n in tok:gmatch("(%d+)") do add(n) end
+        end
+    end
+    table.sort(sel)
     return sel
 end
 
