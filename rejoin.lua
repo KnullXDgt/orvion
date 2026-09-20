@@ -328,40 +328,36 @@ local function detect(prefixes, force)
     return out
 end
 
--- pkg -> pid in ONE su call (also serves as alive check)
-local function pid_map(names)
-    local m = {}
-    if #names == 0 then return m end
-    local cmd = "for p in " .. table.concat(names, " ") .. "; do echo \"$p=$(pidof $p)\"; done"
+-- pkg -> pid AND recent disconnects in ONE su call (halves process spawns)
+-- returns pm (pkg->pid), dis (pkg->{code,key})
+local function scan_state(names)
+    local pm, dis = {}, {}
+    if #names == 0 then return pm, dis end
+    local cmd = "for p in " .. table.concat(names, " ") .. "; do echo \"P $p=$(pidof $p)\"; done; " ..
+        "logcat -d -t 80 -s Roblox 2>/dev/null | grep -aF 'disconnect with reason' | tail -20"
     local out = su_cmd(cmd)
-    for line in out:gmatch("[^\n]+") do
-        local p, pid = line:match("^(%S+)=(%d+)")
-        if p and pid then m[p] = tonumber(pid) end
-    end
-    return m
-end
+    if out == "" then return pm, dis end
 
--- read recent disconnect events from logcat, map pid -> package
--- returns pkg -> { code = N, key = "<unique event id>" }
-local function read_disconnects(pm)
     local pid2pkg = {}
-    for pkg, pid in pairs(pm) do pid2pkg[pid] = pkg end
-    if next(pid2pkg) == nil then return {} end
-
-    local out = su_cmd("logcat -d -t 4000 2>/dev/null | grep -aE 'Sending.disconnect.with.reason' | tail -30")
-    local res = {}
+    local loglines = {}
     for line in out:gmatch("[^\n]+") do
+        local p, pid = line:match("^P (%S+)=(%d+)")
+        if p then
+            pm[p] = tonumber(pid); pid2pkg[tonumber(pid)] = p
+        elseif line:match("%d+:%d+:%d+%.%d+") then
+            table.insert(loglines, line)
+        end
+    end
+    for _, line in ipairs(loglines) do
         local pid  = line:match("^%d+-%d+%s+%d+:%d+:%d+%.%d+%s+(%d+)")
         local code = line:match("reason:%s*(%d+)")
         local key  = line:match("(%d%d%d%d%-%d%d%-%d%dT[%d:%.]+Z)")
         if pid and code then
             local pkg = pid2pkg[tonumber(pid)]
-            if pkg then
-                res[pkg] = { code = tonumber(code), key = key or line }
-            end
+            if pkg then dis[pkg] = { code = tonumber(code), key = key or line } end
         end
     end
-    return res
+    return pm, dis
 end
 
 -- ============================================================
@@ -575,13 +571,12 @@ screen_start = function(cfg)
     local quit = false
     local pm, dis = {}, {}
     local next_scan = 0
+    local SCAN_SEC = 5   -- one su call per 5s: light on CPU/RAM
     while not quit do
         local now = os.time()
-        -- scan pid + logcat every 2s (keeps su calls low on multi-account)
         if now >= next_scan then
-            next_scan = now + 2
-            pm  = pid_map(names)        -- pkg -> pid (alive check)
-            dis = read_disconnects(pm)  -- pkg -> { code, key }
+            next_scan = now + SCAN_SEC
+            pm, dis = scan_state(names)   -- ONE su call: pids + disconnect codes
         end
 
         head("Start  (" .. fmt_clock(now - t0) .. ")")
