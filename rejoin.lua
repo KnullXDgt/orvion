@@ -45,11 +45,10 @@ local function load_cfg()
     local cfg = {
         launch_delay = 10, margin = 24,
         place_id = "", autoexec_path = "", autoexec_script = "",
-        prefixes = {}, ps = {}, pkgs = {},
+        prefix = DEF_PREFIX, ps = {}, pkgs = {},
     }
     local f = io.open(CFG_PATH, "r")
     if not f then
-        table.insert(cfg.prefixes, DEF_PREFIX)
         return cfg, false
     end
     for line in f:lines() do
@@ -58,7 +57,7 @@ local function load_cfg()
             local k, v = line:match("^([%w_]+)%s*=%s*(.*)$")
             if k then
                 if k == "prefix" then
-                    if v ~= "" then table.insert(cfg.prefixes, v) end
+                    if v ~= "" then cfg.prefix = v end
                 elseif k == "launch_delay" then cfg.launch_delay = tonumber(v) or cfg.launch_delay
                 elseif k == "margin" then cfg.margin = tonumber(v) or cfg.margin
                 elseif k == "place_id" then cfg.place_id = v
@@ -81,7 +80,7 @@ local function load_cfg()
         end
     end
     f:close()
-    if #cfg.prefixes == 0 then table.insert(cfg.prefixes, DEF_PREFIX) end
+    if cfg.prefix == "" then cfg.prefix = DEF_PREFIX end
     return cfg, true
 end
 
@@ -94,7 +93,7 @@ local function save_cfg(cfg)
     f:write("place_id=" .. cfg.place_id .. "\n")
     f:write("autoexec_path=" .. cfg.autoexec_path .. "\n")
     f:write("autoexec_script=" .. cfg.autoexec_script .. "\n")
-    for _, p in ipairs(cfg.prefixes) do f:write("prefix=" .. p .. "\n") end
+    f:write("prefix=" .. cfg.prefix .. "\n")
     for name, p in pairs(cfg.pkgs) do
         f:write(string.format("pkg=%s,%d,%d,%d,%d,%d\n",
             name, p.selected, p.on, p.heartbeat, p.rejoin, p.ps_index))
@@ -296,33 +295,54 @@ local function detect_screen()
 end
 
 local _pkg_cache, _pkg_t = nil, 0
-local function all_packages()
-    local now = os.time()
-    if _pkg_cache and (now - _pkg_t) < 8 then return _pkg_cache end
-    local h = io.popen("pm list packages 2>/dev/null")
-    local r = ""
-    if h then r = h:read("*a") or ""; h:close() end
+local _pkg_src = "?"   -- for display/debug: which sources contributed
+local function parse_pkg_lines(r)
     local out = {}
     for line in r:gmatch("[^\r\n]+") do
         local p = line:match("package:(.+)")
         if p then p = clean_pkg(p); if p then table.insert(out, p) end end
     end
+    return out
+end
+-- union of plain pm AND su pm (clone apps can be hidden from unprivileged pm)
+local function all_packages()
+    local now = os.time()
+    if _pkg_cache and (now - _pkg_t) < 8 then return _pkg_cache end
+    local seen, out = {}, {}
+    local srcs = {}
+    local function add(list, tag)
+        if #list == 0 then return end
+        srcs[#srcs + 1] = tag
+        for _, p in ipairs(list) do
+            if not seen[p] then seen[p] = true; table.insert(out, p) end
+        end
+    end
+    -- 1) plain pm
+    local h = io.popen("pm list packages 2>/dev/null")
+    if h then add(parse_pkg_lines(h:read("*a") or ""), "pm"); h:close() end
+    -- 2) su pm (covers clone/hidden apps)
+    local h2 = io.popen("su -c 'pm list packages' 2>/dev/null")
+    if h2 then add(parse_pkg_lines(h2:read("*a") or ""), "su"); h2:close() end
+    -- 3) last resort: full path via su
+    if #out == 0 then
+        local h3 = io.popen("su -c '/system/bin/pm list packages' 2>/dev/null")
+        if h3 then add(parse_pkg_lines(h3:read("*a") or ""), "su-path"); h3:close() end
+    end
+    table.sort(out)
+    _pkg_src = (#srcs > 0) and table.concat(srcs, "+") or "none"
     _pkg_cache, _pkg_t = out, now
     return out
 end
 local function drop_cache() _pkg_cache, _pkg_t = nil, 0 end
 
--- filter starts-with (hard): only packages beginning with a prefix
-local function detect(prefixes, force)
+-- filter starts-with (hard): only packages beginning with the prefix
+local function detect(prefix, force)
     if force then drop_cache() end
+    if not prefix or prefix == "" then return {} end
     local all = all_packages()
-    local out, seen = {}, {}
+    local out = {}
     for _, p in ipairs(all) do
-        for _, pref in ipairs(prefixes) do
-            if pref ~= "" and p:sub(1, #pref) == pref and not seen[p] then
-                table.insert(out, p); seen[p] = true; break
-            end
-        end
+        if p:sub(1, #prefix) == prefix then table.insert(out, p) end
     end
     table.sort(out)
     return out
@@ -721,55 +741,40 @@ screen_rejoin = function(cfg)
     end
 end
 
--- ---- PREFIX ----
+-- ---- PREFIX ---- (single prefix, ketik langsung untuk ganti)
 screen_prefix = function(cfg)
     local note, scan
     while true do
         head("Prefix")
+        box_open("prefix")
+        box_line(cfg.prefix)
+        box_close()
         if scan then
+            print("")
             box_open("scan result (" .. #scan .. ")")
             if #scan == 0 then box_line("(no package matched)")
             else for i, p in ipairs(scan) do box_line(string.format("%-3d %s", i, p)) end end
             box_close()
-        else
-            box_open("active prefix")
-            if #cfg.prefixes == 0 then box_line("(empty)")
-            else for i, p in ipairs(cfg.prefixes) do box_line(string.format("%-3d %s", i, p)) end end
-            box_close()
         end
         print("")
-        print("  [a] - add prefix")
-        print("  [d] - delete prefix")
+        print("  [type] - set new prefix")
         print("  [s] - scan package")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
-        if c:lower() == "a" then
-            local p = prompt(nil, "new prefix (e.g. com.moons)")
-            if p then
-                p = p:gsub("%s", "")
-                local dup = false
-                for _, x in ipairs(cfg.prefixes) do if x == p then dup = true end end
-                if dup then note = "!already exists"
-                elseif p:match("^[%w_%.]+$") then
-                    table.insert(cfg.prefixes, p); save_cfg(cfg); scan = nil
-                    note = "added: " .. p
-                else note = "!invalid format" end
-            end
-        elseif c:lower() == "d" then
-            if #cfg.prefixes == 0 then note = "!no prefix yet"
-            else
-                local n = tonumber(prompt(nil, "number to delete"))
-                if n and n >= 1 and n <= #cfg.prefixes then
-                    table.remove(cfg.prefixes, n); save_cfg(cfg); scan = nil; note = "deleted"
-                else note = "!invalid number" end
-            end
-        elseif c:lower() == "s" then
-            scan = detect(cfg.prefixes, true)
+        if c:lower() == "s" then
+            scan = detect(cfg.prefix, true)
             if #scan == 0 then note = "!no package matched" end
-        else note = "!invalid choice" end
+        else
+            local p = c:gsub("%s", "")
+            if p == "" then note = "!empty"
+            elseif p:match("^[%w_%.]+$") then
+                cfg.prefix = p; save_cfg(cfg); scan = nil
+                note = "prefix set: " .. p
+            else note = "!invalid format" end
+        end
     end
 end
 
@@ -777,11 +782,12 @@ end
 screen_packages = function(cfg)
     local note
     while true do
-        local det = detect(cfg.prefixes)
+        local det = detect(cfg.prefix)
         head("Packages")
         box_open("detected (" .. #det .. ")")
         if #det == 0 then
-            box_line("(none -- set prefix first in menu [3])")
+            box_line("(none -- prefix: " .. cfg.prefix .. ")")
+            box_line("source: " .. _pkg_src)
         else
             for i, p in ipairs(det) do
                 local e = cfg.pkgs[p]
