@@ -471,9 +471,11 @@ local function build_intent(pkg, ps_url, place_id)
     end
     return nil
 end
-local function launch(pkg, ps_url, place_id, reason)
-    su_exec("am force-stop " .. pkg)
-    sleep(1)
+local function launch(pkg, ps_url, place_id, reason, no_stop)
+    if not no_stop then
+        su_exec("am force-stop " .. pkg)
+        sleep(1)
+    end
     local intent = build_intent(pkg, ps_url, place_id)
     if not intent then hlog("SKIP " .. pkg); return false end
     su_exec('am start --user 0 "' .. intent .. '"')
@@ -653,9 +655,13 @@ screen_start = function(cfg)
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
+        -- order matters (like baseline): force-stop FIRST, then write layout,
+        -- then launch. Otherwise App Cloner overwrites the prefs on shutdown.
+        su_exec("am force-stop " .. name)
+        sleep(1)
         apply_layout(name, L, T, R, B)
         local plist = ps_list_of(p, cfg)
-        launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start")
+        launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", true)
         st[name] = {
             hb_next = os.time() + p.heartbeat,
             rj_next = os.time() + p.rejoin,
