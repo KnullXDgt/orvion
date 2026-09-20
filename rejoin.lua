@@ -2,12 +2,18 @@
 -- Limbo Rejoin
 -- baseline: PS Hopper Tool v3.0 (Termux + root Android, single file)
 -- UI: box rapi (title di dalam), menu [n] - item, English
+-- Detect: logcat disconnect code -> halt on ban, rejoin otherwise
 -- ============================================================
 
 local CFG_PATH = "/sdcard/limbo_rejoin.cfg"
 local PS_FILE  = "/sdcard/private_servers.txt"
 local LOG_FILE = "/sdcard/limbo_rejoin.log"
 local DEF_PREFIX = "com.roblox"
+
+-- disconnect codes
+local STOP_CODES  = { [267] = true, [600] = true }         -- ban: never rejoin
+local FAIL_LIMIT  = 3                                       -- relaunch failures
+local FAIL_WINDOW = 60                                      -- within this many seconds -> halt
 
 -- lebar tampilan: ikut terminal, fallback 60
 local function term_cols()
@@ -209,7 +215,7 @@ local function hlog(msg)
 end
 
 -- ============================================================
--- RESOURCE (cpu/ram) -- delta sampling, no sleep, cached
+-- RESOURCE (cpu/ram) -- delta sampling, no sleep, cached 2s
 -- ============================================================
 local _cpu = { pi = 0, pt = 0, pct = 0 }
 local function cpu_read()
@@ -248,7 +254,6 @@ local function ram_read()
     return tonumber(mt), tonumber(ma)
 end
 
--- cache 2s to stay light
 local _res = { t = 0, cpu = 0, used = 0, total = 0 }
 local function resources()
     local now = os.time()
@@ -323,17 +328,40 @@ local function detect(prefixes, force)
     return out
 end
 
-local function alive_map(names)
-    if #names == 0 then return {} end
-    local cmd = "for p in " .. table.concat(names, " ") ..
-        "; do if pidof $p >/dev/null 2>&1; then echo \"$p=1\"; else echo \"$p=0\"; fi; done"
-    local out = su_cmd(cmd)
+-- pkg -> pid in ONE su call (also serves as alive check)
+local function pid_map(names)
     local m = {}
+    if #names == 0 then return m end
+    local cmd = "for p in " .. table.concat(names, " ") .. "; do echo \"$p=$(pidof $p)\"; done"
+    local out = su_cmd(cmd)
     for line in out:gmatch("[^\n]+") do
-        local k, v = line:match("^(.-)=(%d)$")
-        if k then m[k] = (v == "1") end
+        local p, pid = line:match("^(%S+)=(%d+)")
+        if p and pid then m[p] = tonumber(pid) end
     end
     return m
+end
+
+-- read recent disconnect events from logcat, map pid -> package
+-- returns pkg -> { code = N, key = "<unique event id>" }
+local function read_disconnects(pm)
+    local pid2pkg = {}
+    for pkg, pid in pairs(pm) do pid2pkg[pid] = pkg end
+    if next(pid2pkg) == nil then return {} end
+
+    local out = su_cmd("logcat -d -t 4000 2>/dev/null | grep -aE 'Sending.disconnect.with.reason' | tail -30")
+    local res = {}
+    for line in out:gmatch("[^\n]+") do
+        local pid  = line:match("^%d+-%d+%s+%d+:%d+:%d+%.%d+%s+(%d+)")
+        local code = line:match("reason:%s*(%d+)")
+        local key  = line:match("(%d%d%d%d%-%d%d%-%d%dT[%d:%.]+Z)")
+        if pid and code then
+            local pkg = pid2pkg[tonumber(pid)]
+            if pkg then
+                res[pkg] = { code = tonumber(code), key = key or line }
+            end
+        end
+    end
+    return res
 end
 
 -- ============================================================
@@ -361,7 +389,7 @@ local function grid_bounds(i, n, sw, sh, off, margin)
 end
 
 -- ============================================================
--- LAUNCH
+-- LAUNCH (always force-stop first, then start)
 -- ============================================================
 local function build_intent(pkg, ps_url, place_id)
     if ps_url and ps_url ~= "" then
@@ -485,6 +513,23 @@ local function fmt_clock(sec)
     return string.format("%02d:%02d:%02d",
         math.floor(sec / 3600), math.floor((sec % 3600) / 60), sec % 60)
 end
+
+-- relaunch one package. scheduled=true means hopper timer (not a failure)
+local function relaunch(s, p, cfg, name, reason, scheduled, now)
+    local ps_url = cfg.ps[s.ps_index] or cfg.ps[1] or ""
+    launch(name, ps_url, cfg.place_id, reason)
+    s.status = reason
+    if not scheduled then
+        table.insert(s.fails, now)
+        while #s.fails > 0 and (now - s.fails[1]) > FAIL_WINDOW do table.remove(s.fails, 1) end
+        if #s.fails >= FAIL_LIMIT then
+            s.halted = true
+            s.halt_code = "retry x" .. #s.fails
+            hlog("HALT " .. name .. " (" .. #s.fails .. " fails in " .. FAIL_WINDOW .. "s)")
+        end
+    end
+end
+
 screen_start = function(cfg)
     local names = active_list(cfg)
     if #names == 0 then
@@ -520,14 +565,24 @@ screen_start = function(cfg)
             rj_next = os.time() + p.rejoin,
             status = "rejoin",
             ps_index = p.ps_index,
+            halted = false, halt_code = nil,
+            fails = {},
+            disc_key = nil,
         }
         if i < #names then sleep(cfg.launch_delay) end
     end
 
     local quit = false
+    local pm, dis = {}, {}
+    local next_scan = 0
     while not quit do
         local now = os.time()
-        local am = alive_map(names)
+        -- scan pid + logcat every 2s (keeps su calls low on multi-account)
+        if now >= next_scan then
+            next_scan = now + 2
+            pm  = pid_map(names)        -- pkg -> pid (alive check)
+            dis = read_disconnects(pm)  -- pkg -> { code, key }
+        end
 
         head("Start  (" .. fmt_clock(now - t0) .. ")")
         box_open("resource")
@@ -536,18 +591,19 @@ screen_start = function(cfg)
         print("")
 
         box_open("package")
-        box_line(string.format("%-22s %-9s %-5s %s", "package", "status", "ps", "rejoin"))
+        box_line(string.format("%-20s %-13s %-5s %s", "package", "status", "ps", "rejoin"))
         box_blank()
         for _, name in ipairs(names) do
             local s = st[name]; local p = cfg.pkgs[name]
-            local alive = am[name]
             local status
-            if s.status == "rejoin" and alive then status = "rejoin"
-            else status = alive and "alive" or "dead" end
-            box_line(string.format("%-22s %-9s %-5s %s",
-                cut(name, 22), status, "ps" .. s.ps_index,
-                p.rejoin > 0 and (p.rejoin .. "s") or "off"))
-            if alive then s.status = "alive" end
+            if s.halted then status = "halted"
+            elseif dis[name] then status = "code " .. dis[name].code
+            elseif pm[name] then status = "alive"
+            else status = "dead" end
+            local extra = s.halted and ("  " .. (s.halt_code or "")) or ""
+            box_line(string.format("%-20s %-13s %-5s %s%s",
+                cut(name, 20), status, "ps" .. s.ps_index,
+                p.rejoin > 0 and (p.rejoin .. "s") or "off", extra))
         end
         box_close()
         print("")
@@ -559,28 +615,34 @@ screen_start = function(cfg)
         now = os.time()
         for _, name in ipairs(names) do
             local s = st[name]; local p = cfg.pkgs[name]
-            local launched = false
-
-            -- rejoin: force re-entry every N seconds (0 = off). This rotates PS.
-            if p.rejoin > 0 and now >= s.rj_next then
-                s.rj_next = now + p.rejoin
-                if #cfg.ps > 1 then
-                    s.ps_index = s.ps_index + 1
-                    if s.ps_index > #cfg.ps then s.ps_index = 1 end
-                end
-                hlog("rejoin " .. name .. " (ps " .. s.ps_index .. ")")
-                launch(name, cfg.ps[s.ps_index] or cfg.ps[1] or "", cfg.place_id, "rejoin")
-                s.status = "rejoin"
-                launched = true
-            end
-
-            -- heartbeat: cek hidup/mati, relaunch kalau mati
-            if p.heartbeat > 0 and now >= s.hb_next then
-                s.hb_next = now + p.heartbeat
-                if not am[name] and not launched then
-                    hlog("heartbeat " .. name .. " dead -> rejoin")
-                    launch(name, cfg.ps[s.ps_index] or cfg.ps[1] or "", cfg.place_id, "heartbeat")
-                    s.status = "rejoin"
+            if s.halted then
+                -- isolated: this account is done, others keep running untouched
+            else
+                local d = dis[name]
+                if d and d.key ~= s.disc_key then
+                    s.disc_key = d.key
+                    if STOP_CODES[d.code] then
+                        s.halted = true
+                        s.halt_code = "ban " .. d.code
+                        hlog("HALT " .. name .. " (code " .. d.code .. ")")
+                    else
+                        hlog("disconnect " .. name .. " code " .. d.code .. " -> relaunch")
+                        relaunch(s, p, cfg, name, "rejoin " .. d.code, false, now)
+                    end
+                elseif p.rejoin > 0 and now >= s.rj_next then
+                    s.rj_next = now + p.rejoin
+                    if #cfg.ps > 1 then
+                        s.ps_index = s.ps_index + 1
+                        if s.ps_index > #cfg.ps then s.ps_index = 1 end
+                    end
+                    hlog("rejoin " .. name .. " (ps " .. s.ps_index .. ")")
+                    relaunch(s, p, cfg, name, "rejoin", true, now)
+                elseif p.heartbeat > 0 and now >= s.hb_next then
+                    s.hb_next = now + p.heartbeat
+                    if not pm[name] then
+                        hlog("heartbeat " .. name .. " dead -> relaunch")
+                        relaunch(s, p, cfg, name, "dead", false, now)
+                    end
                 end
             end
         end
