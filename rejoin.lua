@@ -5,6 +5,37 @@
 -- Detect: logcat disconnect code -> halt on ban, rejoin otherwise
 -- ============================================================
 
+-- ---- single-instance guard ----------------------------------
+-- Running two copies makes them fight (each force-stops the other's
+-- clients -> endless "dead -> relaunch" and double hops). Kill any old
+-- copy of this script before continuing.
+local LOCK_FILE = "/sdcard/.limbo_rejoin.pid"
+do
+    local mypid = nil
+    local h = io.popen("cat /proc/self/stat 2>/dev/null")
+    if h then local t = h:read("*l"); h:close(); mypid = t and t:match("^(%d+)") end
+    if mypid then
+        local old = nil
+        local f = io.open(LOCK_FILE, "r")
+        if f then old = tonumber(f:read("*l")); f:close() end
+        if old and old ~= tonumber(mypid) then
+            -- is the old pid still a running rejoin script?
+            local alive = false
+            local c = io.open("/proc/" .. old .. "/cmdline", "r")
+            if c then
+                local cl = c:read("*a") or ""; c:close()
+                if cl:match("rejoin") then alive = true end
+            end
+            if alive then
+                os.execute("kill -9 " .. old .. " 2>/dev/null")
+                os.execute("sleep 1")
+            end
+        end
+        local w = io.open(LOCK_FILE, "w")
+        if w then w:write(mypid .. "\n"); w:close() end
+    end
+end
+
 local CFG_PATH = "/sdcard/limbo_rejoin.cfg"
 local PS_FILE  = "/sdcard/private_servers.txt"
 local LOG_FILE = "/sdcard/limbo_rejoin.log"
@@ -12,6 +43,7 @@ local DEF_PREFIX = "com.roblox"
 
 -- disconnect codes
 local STOP_CODES  = { [267] = true, [600] = true }         -- ban: never rejoin
+local HEARTBEAT_GRACE = 45                                  -- don't call a client "dead" before it has booted
 local FAIL_LIMIT  = 3                                       -- relaunch failures
 local FAIL_WINDOW = 60                                      -- within this many seconds -> halt
 
@@ -714,6 +746,7 @@ end
 local function relaunch(s, p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
     launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
+    s.born = now            -- (re)start the boot-grace window
     s.status = reason
     if not scheduled then
         table.insert(s.fails, now)
@@ -795,6 +828,7 @@ screen_start = function(cfg, mode)
         st[name] = {
             hb_next = os.time() + p.heartbeat,
             rj_next = os.time() + (p.rejoin * 60),   -- minutes -> seconds
+            born    = os.time(),
             joined  = os.time(),
             hops    = 0,
             status  = "join",
@@ -816,15 +850,38 @@ screen_start = function(cfg, mode)
         end
     end
 
+    -- IMPORTANT: timers were armed when each package launched, but the monitor
+    -- loop only starts after the LAST launch (+ launch_delay each). By then the
+    -- heartbeat timer is already expired and fires immediately -> false
+    -- "dead -> relaunch". Re-arm every timer from the moment monitoring begins.
+    local mon_start = os.time()
+    for _, name in ipairs(names) do
+        local s = st[name]; local p = cfg.pkgs[name]
+        s.hb_next = mon_start + p.heartbeat
+        s.rj_next = mon_start + (p.rejoin * 60)
+        s.born    = mon_start
+        s.joined  = mon_start
+        s.disc_key = nil
+    end
+
     local quit = false
     local pm, dis = {}, {}
     local next_scan = 0
+    local primed = false
     local SCAN_SEC = 5   -- one su call per 5s: light on CPU/RAM
     while not quit do
         local now = os.time()
         if now >= next_scan then
             next_scan = now + SCAN_SEC
             pm, dis = scan_state(names)   -- ONE su call: pids + disconnect codes
+            -- first scan: baseline any stale disconnect codes still in the
+            -- logcat buffer so we don't relaunch on an OLD session's code.
+            if not primed then
+                primed = true
+                for _, name in ipairs(names) do
+                    if dis[name] then st[name].disc_key = dis[name].key end
+                end
+            end
         end
 
         head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
@@ -905,9 +962,11 @@ screen_start = function(cfg, mode)
                     s.hops = s.hops + 1
                 elseif p.heartbeat > 0 and now >= s.hb_next then
                     s.hb_next = now + p.heartbeat
-                    if not pm[name] then
+                    -- only trust "dead" once the client has had time to boot
+                    if not pm[name] and (now - s.born) >= HEARTBEAT_GRACE then
                         hlog("heartbeat " .. name .. " dead -> relaunch")
                         relaunch(s, p, cfg, name, "dead", false, now)
+                        s.born = now
                         s.joined = now
                     end
                 end
