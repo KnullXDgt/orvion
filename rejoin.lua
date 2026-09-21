@@ -861,16 +861,10 @@ local function enter_ps(s, ps_idx, now)
     s.ps_hist[ps_idx] = h
 end
 
--- re-foreground the OTHER clients after a relaunch. Without this, the relaunch
--- steals the window from the untouched clients -> Roblox destroys their surface
--- -> OnLowMemory -> LeaveGame 285 ~15s later (cascade). Verified fix.
-local refocus_others = nil
-
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
 local function relaunch(s, p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
     launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
-    if refocus_others then sleep(2); refocus_others(name) end
     s.born = now            -- (re)start the boot-grace window
     s.status = reason
     if not scheduled then
@@ -938,14 +932,6 @@ screen_start = function(cfg, mode)
     end
 
     for _, name in ipairs(names) do lstat[name] = "wait" end
-
-    refocus_others = function(target)
-        for _, other in ipairs(names) do
-            if other ~= target then
-                su_exec("am start --user 0 -n " .. other .. "/com.roblox.client.ActivityNativeMain")
-            end
-        end
-    end
 
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
