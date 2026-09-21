@@ -1387,6 +1387,7 @@ screen_config = function(cfg)
         print("  [s] - save current config as preset")
         print("  [l] - load a preset")
         print("  [d] - delete a preset")
+        print("  [r] - reset all (clear every package's server choice)")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
@@ -1419,6 +1420,23 @@ screen_config = function(cfg)
                 if n and n >= 1 and n <= #presets then
                     delete_preset(presets[n]); note = "deleted: " .. presets[n]
                 else note = "!invalid number" end
+            end
+
+        elseif c:lower() == "r" then
+            head("Config  >  reset")
+            col("31"); print("are you sure you want to reset all?"); off()
+            print("")
+            print("this clears every package's server choice (ps) and sets")
+            print("mode back to hopper.  saved presets are NOT deleted.")
+            print("")
+            local yn = prompt(nil, "y / n")
+            if yn and yn:lower() == "y" then
+                for _, p in pairs(cfg.pkgs) do p.ps = "" end
+                cfg.mode = "hopper"
+                save_cfg(cfg)
+                note = "all server choices reset"
+            else
+                note = "reset cancelled"
             end
 
         else note = "!invalid choice" end
