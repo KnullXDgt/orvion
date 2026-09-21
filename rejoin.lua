@@ -861,10 +861,16 @@ local function enter_ps(s, ps_idx, now)
     s.ps_hist[ps_idx] = h
 end
 
+-- re-foreground the OTHER clients after a relaunch. Without this, the relaunch
+-- steals the window from the untouched clients -> Roblox destroys their surface
+-- -> OnLowMemory -> LeaveGame 285 ~15s later (cascade). Verified fix.
+local refocus_others = nil
+
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
 local function relaunch(s, p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
     launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
+    if refocus_others then sleep(2); refocus_others(name) end
     s.born = now            -- (re)start the boot-grace window
     s.status = reason
     if not scheduled then
@@ -932,6 +938,14 @@ screen_start = function(cfg, mode)
     end
 
     for _, name in ipairs(names) do lstat[name] = "wait" end
+
+    refocus_others = function(target)
+        for _, other in ipairs(names) do
+            if other ~= target then
+                su_exec("am start --user 0 -n " .. other .. "/com.roblox.client.ActivityNativeMain")
+            end
+        end
+    end
 
     for i, name in ipairs(names) do
         local p = cfg.pkgs[name]
@@ -1110,8 +1124,19 @@ screen_start = function(cfg, mode)
                     s.hops = s.hops + 1
                 elseif p.heartbeat > 0 and now >= s.hb_next then
                     s.hb_next = now + p.heartbeat
-                    -- only trust "dead" once the client has had time to boot
-                    if not pm[name] and (now - s.born) >= HEARTBEAT_GRACE then
+                    -- FIX: do NOT trust the periodic scan snapshot here. With the
+                    -- scan cadence tied to the heartbeat (90s) the snapshot can be
+                    -- up to 90s old -- e.g. taken during boot when pidof was still
+                    -- empty -- producing a FALSE "dead" -> endless relaunch storm
+                    -- (and the force-stop+launch then cascades the other clients).
+                    -- Do a fresh pidof at the exact decision moment.
+                    local alive_now = (su_cmd("pidof " .. name) ~= "")
+                    if not pm[name] and alive_now then
+                        hlog("heartbeat " .. name .. " STALE-SNAPSHOT pm=dead real=alive (skipped)")
+                    elseif pm[name] and not alive_now then
+                        hlog("heartbeat " .. name .. " pm=alive real=dead")
+                    end
+                    if not alive_now and (now - s.born) >= HEARTBEAT_GRACE then
                         hlog("heartbeat " .. name .. " dead -> relaunch")
                         relaunch(s, p, cfg, name, "dead", false, now)
                         s.born = now
