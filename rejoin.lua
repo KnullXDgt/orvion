@@ -490,6 +490,23 @@ local function detect(prefix, force)
     return out
 end
 
+-- FIX: the detector cadence follows the HEARTBEAT, not a fixed 5s. A 5s scan
+-- spawns `su` + reads logcat 12x/min (heavy on a 4GB device, and it fired the
+-- relaunch within seconds of a 285 -> "instant detection" avalanche). With this
+-- the scan runs once per heartbeat (e.g. heartbeat=90 -> detect every 90s).
+local function scan_interval(cfg, names)
+    local iv = nil
+    for _, name in ipairs(names) do
+        local p = cfg.pkgs[name]
+        local hb = p and p.heartbeat or 0
+        if hb and hb > 0 and (not iv or hb < iv) then iv = hb end
+    end
+    if not iv then iv = 10 end     -- no heartbeat set -> light 10s default
+    if iv < 5 then iv = 5 end      -- never hammer faster than 5s
+    if iv > 300 then iv = 300 end  -- sanity cap
+    return iv
+end
+
 -- pkg -> pid AND recent disconnects in ONE su call (halves process spawns)
 -- returns pm (pkg->pid), dis (pkg->{code,key})
 local function scan_state(names)
@@ -591,8 +608,18 @@ end
 -- ============================================================
 local function build_intent(pkg, ps_url, place_id)
     if ps_url and ps_url ~= "" then
+        -- DIRECT roblox:// deep link. Opening the https share URL first goes
+        -- through the browser/chooser (an extra app steals foreground -> the
+        -- OTHER clients lose their surface and auto-leave ~15s later). The
+        -- roblox://navigation/share_links form lands in the client directly.
+        local code = ps_url:match("code=([%w]+)")
+        local typ  = ps_url:match("type=(%w+)") or "Server"
+        if code then
+            return "intent://navigation/share_links?code=" .. code .. "&type=" .. typ ..
+                "#Intent;scheme=roblox;package=" .. pkg .. ";action=android.intent.action.VIEW;end"
+        end
         local dp = ps_url:match("^intent://(.-)#Intent") or ps_url:gsub("^https?://", "")
-        return "intent://" .. dp .. "#Intent;scheme=https;package=" .. pkg .. ";action=android.intent.action.VIEW;end"
+        return "intent://" .. dp .. "#Intent;scheme=roblox;package=" .. pkg .. ";action=android.intent.action.VIEW;end"
     end
     if place_id and place_id ~= "" then
         return "intent://experiences/start?placeId=" .. place_id ..
@@ -964,7 +991,7 @@ screen_start = function(cfg, mode)
     local next_scan = 0
     local primed = false
     local last_status = 0
-    local SCAN_SEC = 5   -- one su call per 5s: light on CPU/RAM
+    local SCAN_SEC = scan_interval(cfg, names)   -- FIX: follow heartbeat, not 5s
     while not quit do
         local now = os.time()
         if now >= next_scan then
