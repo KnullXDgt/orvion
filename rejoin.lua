@@ -742,6 +742,24 @@ local function fmt_elapsed(sec)
     else return string.format("%ds", ss) end
 end
 
+-- record a package ENTERING a PS index. Closes the previous visit
+-- (accumulating its seconds) and opens a new one. Mirrors baseline:
+--   - per-PS elapsed ACCUMULATES across visits
+--   - per-PS hops COUNTS visits
+--   - joined is OVERWRITTEN with the latest visit time
+local function enter_ps(s, ps_idx, now)
+    if s.cur_ps and s.ps_hist[s.cur_ps] then
+        local h = s.ps_hist[s.cur_ps]
+        h.sec = h.sec + (now - s.joined)
+    end
+    s.cur_ps = ps_idx
+    s.joined = now
+    local h = s.ps_hist[ps_idx] or { sec = 0, hops = 0, joined = now }
+    h.hops = h.hops + 1
+    h.joined = now
+    s.ps_hist[ps_idx] = h
+end
+
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
 local function relaunch(s, p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
@@ -834,10 +852,13 @@ screen_start = function(cfg, mode)
             status  = "join",
             plist = plist,
             pptr = 1,
+            ps_hist = {},          -- ps_idx -> { sec, hops, joined }
+            cur_ps = nil,
             halted = false, halt_code = nil,
             fails = {},
             disc_key = nil,
         }
+        enter_ps(st[name], plist[1], os.time())
         lstat[name] = "done"
         if i < #names then
             -- countdown until the next package starts
@@ -857,10 +878,10 @@ screen_start = function(cfg, mode)
     local mon_start = os.time()
     for _, name in ipairs(names) do
         local s = st[name]; local p = cfg.pkgs[name]
+        -- only re-arm the HEARTBEAT cadence from monitor start. rj_next/joined/
+        -- born keep their per-package launch times, so hops stay staggered by
+        -- launch_delay (same as the initial launch) instead of firing together.
         s.hb_next = mon_start + p.heartbeat
-        s.rj_next = mon_start + (p.rejoin * 60)
-        s.born    = mon_start
-        s.joined  = mon_start
         s.disc_key = nil
     end
 
@@ -868,6 +889,7 @@ screen_start = function(cfg, mode)
     local pm, dis = {}, {}
     local next_scan = 0
     local primed = false
+    local last_status = 0
     local SCAN_SEC = 5   -- one su call per 5s: light on CPU/RAM
     while not quit do
         local now = os.time()
@@ -882,6 +904,22 @@ screen_start = function(cfg, mode)
                     if dis[name] then st[name].disc_key = dis[name].key end
                 end
             end
+            -- offline monitor: one STATUS line per package every 60s
+            if now - last_status >= 60 then
+                last_status = now
+                for _, name in ipairs(names) do
+                    local s = st[name]
+                    local cur = s.plist[s.pptr] or 1
+                    local txt
+                    if s.halted then txt = "HALT " .. (s.halt_code or "")
+                    elseif dis[name] then txt = "code " .. dis[name].code
+                    elseif pm[name] then txt = "alive"
+                    else txt = "dead" end
+                    hlog(string.format("STATUS %s ps%d %s up=%s hops=%d next_hop=%ds",
+                        name, cur, txt, fmt_elapsed(now - s.joined), s.hops,
+                        math.max(0, s.rj_next - now)))
+                end
+            end
         end
 
         head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
@@ -892,21 +930,30 @@ screen_start = function(cfg, mode)
 
         box_open("package")
         if mode == "hopper" then
-            box_line(string.format("%-2s %-15s %-4s %-5s %-6s %-2s %s",
+            box_line(string.format("%-2s %-14s %-4s %-5s %-6s %-2s %s",
                 "#", "package", "ps", "join", "up", "hp", "st"))
             box_blank()
             for i, name in ipairs(names) do
                 local s = st[name]
-                local cur = s.plist[s.pptr] or 1
                 local mark
                 if s.halted then mark = "HALT " .. (s.halt_code or "")
                 elseif dis[name] then mark = "code " .. dis[name].code
                 elseif pm[name] then mark = "alive"
                 else mark = "dead" end
-                box_line(string.format("%-2d %-15s %-4s %-5s %-6s %-2d %s",
-                    i, cut(name, 15), "ps" .. cur,
-                    os.date("%H:%M", s.joined),
-                    fmt_elapsed(now - s.joined), s.hops, mark))
+                local first = true
+                for _, ps in ipairs(s.plist) do
+                    local h = s.ps_hist[ps]
+                    if h then
+                        local secs = h.sec
+                        if s.cur_ps == ps then secs = secs + (now - h.joined) end
+                        box_line(string.format("%-2s %-14s ps%-2d %-5s %-6s %-2d %s",
+                            first and tostring(i) or "", first and cut(name, 14) or "",
+                            ps, os.date("%H:%M", h.joined),
+                            fmt_elapsed(secs), h.hops, first and mark or ""))
+                        first = false
+                    end
+                end
+                if i < #names then box_line(string.rep("-", IN - 4)) end
             end
         else
             box_line(string.format("%-2s %-17s %-4s %-6s %s",
@@ -948,7 +995,7 @@ screen_start = function(cfg, mode)
                     else
                         hlog("disconnect " .. name .. " code " .. d.code .. " -> relaunch")
                         relaunch(s, p, cfg, name, "rejoin " .. d.code, false, now)
-                        s.joined = now
+                        -- same PS: keep accumulating this PS's time (no new visit)
                     end
                 elseif mode == "hopper" and p.rejoin > 0 and now >= s.rj_next then
                     s.rj_next = now + (p.rejoin * 60)
@@ -956,9 +1003,9 @@ screen_start = function(cfg, mode)
                         s.pptr = s.pptr + 1
                         if s.pptr > #s.plist then s.pptr = 1 end
                     end
+                    enter_ps(s, s.plist[s.pptr] or 1, now)   -- close old PS, open new
                     hlog("hop " .. name .. " (ps " .. (s.plist[s.pptr] or 1) .. ")")
                     relaunch(s, p, cfg, name, "hop", true, now)
-                    s.joined = now
                     s.hops = s.hops + 1
                 elseif p.heartbeat > 0 and now >= s.hb_next then
                     s.hb_next = now + p.heartbeat
@@ -967,7 +1014,7 @@ screen_start = function(cfg, mode)
                         hlog("heartbeat " .. name .. " dead -> relaunch")
                         relaunch(s, p, cfg, name, "dead", false, now)
                         s.born = now
-                        s.joined = now
+                        -- same PS: do not reset the PS visit accumulator
                     end
                 end
             end
