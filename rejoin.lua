@@ -37,6 +37,7 @@ do
 end
 
 local CFG_PATH = "/sdcard/limbo_rejoin.cfg"
+local CONF_DIR = "/sdcard/limbo_configs"
 local PS_FILE  = "/sdcard/private_servers.txt"
 local LOG_FILE = "/sdcard/limbo_rejoin.log"
 local DEF_PREFIX = "com.roblox"
@@ -147,6 +148,79 @@ local function save_cfg(cfg)
             name, p.selected, p.on, p.heartbeat, p.rejoin, ps_str))
     end
     f:close()
+    return true
+end
+
+-- ---- config presets -----------------------------------------
+-- Save the ENTIRE current config under a name, and load it back later.
+-- Files live in CONF_DIR, one per preset:  /sdcard/limbo_configs/<name>.cfg
+local function preset_path(name)
+    name = tostring(name or ""):gsub("[^%w_%-]", "")
+    if name == "" then return nil end
+    return CONF_DIR .. "/" .. name .. ".cfg"
+end
+
+local function save_preset(cfg, name)
+    local path = preset_path(name)
+    if not path then return false end
+    os.execute("mkdir -p " .. CONF_DIR .. " 2>/dev/null")
+    local f = io.open(path, "w")
+    if not f then return false end
+    f:write("# Limbo preset: " .. name .. "\n")
+    f:write("saved=" .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
+    f:write("launch_delay=" .. cfg.launch_delay .. "\n")
+    f:write("place_id=" .. cfg.place_id .. "\n")
+    f:write("autoexec_path=" .. cfg.autoexec_path .. "\n")
+    f:write("autoexec_script=" .. cfg.autoexec_script .. "\n")
+    f:write("prefix=" .. cfg.prefix .. "\n")
+    f:write("mode=" .. (cfg.mode or "hopper") .. "\n")
+    for name2, p in pairs(cfg.pkgs) do
+        local ps_str = (p.ps or ""):gsub(",", ";")
+        f:write(string.format("pkg=%s,%d,%d,%d,%d,%s\n",
+            name2, p.selected, p.on, p.heartbeat, p.rejoin, ps_str))
+    end
+    f:close()
+    return true
+end
+
+local function list_presets()
+    local out = {}
+    local h = io.popen("ls " .. CONF_DIR .. "/*.cfg 2>/dev/null")
+    if not h then return out end
+    for line in h:lines() do
+        local n = line:match("([^/]+)%.cfg$")
+        if n then table.insert(out, n) end
+    end
+    h:close()
+    table.sort(out)
+    return out
+end
+
+-- load a preset: copy it over the live config, then re-read it into cfg
+local function load_preset(cfg, name)
+    local path = preset_path(name)
+    if not path then return false end
+    local f = io.open(path, "r")
+    if not f then return false end
+    f:close()
+    -- apply preset file -> live config file
+    os.execute("cp " .. path .. " " .. CFG_PATH .. " 2>/dev/null")
+    -- re-read the live config into the existing cfg table
+    local nc = load_cfg()
+    cfg.launch_delay = nc.launch_delay
+    cfg.place_id = nc.place_id
+    cfg.autoexec_path = nc.autoexec_path
+    cfg.autoexec_script = nc.autoexec_script
+    cfg.prefix = nc.prefix
+    cfg.mode = nc.mode
+    cfg.pkgs = nc.pkgs
+    return true
+end
+
+local function delete_preset(name)
+    local path = preset_path(name)
+    if not path then return false end
+    os.execute("rm -f " .. path .. " 2>/dev/null")
     return true
 end
 
@@ -659,7 +733,7 @@ end
 -- ============================================================
 -- SCREENS (forward declare)
 -- ============================================================
-local screen_start, screen_rejoin, screen_prefix, screen_packages, screen_server, screen_layout
+local screen_start, screen_rejoin, screen_prefix, screen_packages, screen_server, screen_config
 
 -- ---- MAIN ----
 local function screen_menu(cfg)
@@ -697,7 +771,7 @@ local function screen_menu(cfg)
         print("  3. Prefix")
         print("  4. Packages")
         print("  5. Server")
-        print("  6. Layout")
+        print("  6. Config")
         print("  0. Exit")
         print("")
         local c = prompt(note, "Select")
@@ -719,7 +793,7 @@ local function screen_menu(cfg)
         elseif c == "3" then screen_prefix(cfg)
         elseif c == "4" then screen_packages(cfg)
         elseif c == "5" then screen_server(cfg)
-        elseif c == "6" then screen_layout(cfg)
+        elseif c == "6" then screen_config(cfg)
         else note = "!invalid choice" end
     end
 end
@@ -1295,36 +1369,58 @@ screen_server = function(cfg)
 end
 
 -- ---- LAYOUT ----
-screen_layout = function(cfg)
+screen_config = function(cfg)
     local note
     while true do
-        local sw, sh, off_ = detect_screen()
-        head("Layout")
-        box_open("info")
-        box_line("screen   " .. (sw and (sw .. " x " .. sh) or "?") .. "     offset   " .. off_)
+        local presets = list_presets()
+        head("Config")
+        col("90"); print("mode: " .. (cfg.mode or "hopper")); off()
+        print("")
+        box_open("saved presets (" .. #presets .. ")")
+        if #presets == 0 then
+            box_line("(none -- press s to save current as a preset)")
+        else
+            for i, n in ipairs(presets) do box_line(string.format("%-3d %s", i, n)) end
+        end
         box_close()
         print("")
-        print("  [1] - apply layout")
+        print("  [s] - save current config as preset")
+        print("  [l] - load a preset")
+        print("  [d] - delete a preset")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
         note = nil
         if c == nil or c == "0" then return end
-        if c == "1" then
-            local sel = selected_list(cfg)
-            if #sel == 0 or not sw then note = "!no package / failed to read screen"
+
+        if c:lower() == "s" then
+            local n = prompt(nil, "preset name (e.g. hopper)")
+            if n and n ~= "" then
+                if save_preset(cfg, n) then note = "saved: " .. n
+                else note = "!failed to save" end
+            else note = "!empty name" end
+
+        elseif c:lower() == "l" then
+            if #presets == 0 then note = "!no preset saved"
             else
-                head("Layout  >  apply")
-                box_open("result")
-                for i, name in ipairs(sel) do
-                    local L, T, R, B = grid_bounds(i, #sel, sw, sh, off_)
-                    apply_layout(name, L, T, R, B)
-                    box_line(string.format("%-18s L%-5d T%-5d R%-5d B%d", cut(name, 18), L, T, R, B))
-                end
-                box_close()
-                print(""); col("32"); print("layout applied."); off()
-                pause()
+                local n = tonumber(prompt(nil, "number to load"))
+                if n and n >= 1 and n <= #presets then
+                    local name = presets[n]
+                    if load_preset(cfg, name) then
+                        note = "loaded: " .. name .. " (takes effect on next Start)"
+                    else note = "!load failed" end
+                else note = "!invalid number" end
             end
+
+        elseif c:lower() == "d" then
+            if #presets == 0 then note = "!no preset saved"
+            else
+                local n = tonumber(prompt(nil, "number to delete"))
+                if n and n >= 1 and n <= #presets then
+                    delete_preset(presets[n]); note = "deleted: " .. presets[n]
+                else note = "!invalid number" end
+            end
+
         else note = "!invalid choice" end
     end
 end
