@@ -1387,7 +1387,7 @@ screen_config = function(cfg)
         print("  [s] - save current config as preset")
         print("  [l] - load a preset")
         print("  [d] - delete a preset")
-        print("  [r] - reset all (clear every package's server choice)")
+        print("  [r] - factory reset (restore ALL defaults)")
         print("  [0] - Back")
         print("")
         local c = prompt(note, "Select")
@@ -1424,17 +1424,30 @@ screen_config = function(cfg)
 
         elseif c:lower() == "r" then
             head("Config  >  reset")
-            col("31"); print("are you sure you want to reset all?"); off()
+            col("31"); print("are you sure you want to reset ALL settings?"); off()
             print("")
-            print("this clears every package's server choice (ps) and sets")
-            print("mode back to hopper.  saved presets are NOT deleted.")
+            print("WARNING: restores EVERYTHING to factory defaults:")
+            print("  - package server choices (ps)  -> cleared")
+            print("  - package selection            -> removed (main menu empty)")
+            print("  - heartbeat -> 10s, rejoin -> off")
+            print("  - mode -> hopper, launch_delay -> 10s")
+            print("  - prefix -> " .. DEF_PREFIX)
+            print("saved presets stay intact (reload them from here).")
             print("")
             local yn = prompt(nil, "y / n")
             if yn and yn:lower() == "y" then
-                for _, p in pairs(cfg.pkgs) do p.ps = "" end
+                for _, p in pairs(cfg.pkgs) do
+                    p.ps = ""; p.selected = 0; p.on = 1
+                    p.heartbeat = 10; p.rejoin = 0
+                end
+                cfg.launch_delay = 10
+                cfg.place_id = ""
+                cfg.autoexec_path = ""
+                cfg.autoexec_script = ""
+                cfg.prefix = DEF_PREFIX
                 cfg.mode = "hopper"
                 save_cfg(cfg)
-                note = "all server choices reset"
+                note = "FACTORY RESET done -- restart the tool to see it"
             else
                 note = "reset cancelled"
             end
