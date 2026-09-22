@@ -567,37 +567,71 @@ local function relaunch(st, pkg, reason)
     return ok, err
 end
 
--- ---------------------------------------------------------------- ui
-local IN = 56
-local function col(c) io.write("\27[" .. c .. "m") end
-local function off() io.write("\27[0m") end
-local function cls() io.write("\27[2J\27[3J\27[H\27[0m"); io.flush() end
-local function pad(s, w)
-    s = tostring(s or "")
-    local d = w - #s
-    if d > 0 then return s .. string.rep(" ", d) end
-    if d < 0 then return s:sub(1, w) end
-    return s
+-- ---------------------------------------------------------------- ui (deng/kaeru style)
+local GREEN  = "\27[1;92m"
+local YELLOW = "\27[1;93m"
+local RED    = "\27[1;91m"
+local CYAN   = "\27[1;96m"
+local WHITE  = "\27[1;97m"
+local PINK   = "\27[38;5;205m"
+local RESET  = "\27[0m"
+
+local function sep(char)
+    char = (char or "="):sub(1, 1)
+    return CYAN .. string.rep(char, 30) .. RESET
 end
-local function head(t)
-    cls()
-    print("+" .. string.rep("-", IN) .. "+")
-    col("1;36"); io.write("| " .. pad("Limbo  >  " .. t, IN - 2) .. " |"); off(); print("")
-    print("+" .. string.rep("-", IN) .. "+"); print("")
+local function emit(t) print(t or "") end
+local function header(title)
+    emit()
+    emit(sep("="))
+    emit(CYAN .. title .. RESET)
+    emit(sep("="))
+    emit()
 end
-local function line(t) print("| " .. pad(t, IN - 2) .. " |") end
-local function box(t)
-    print("+" .. string.rep("-", IN) .. "+")
-    col("1;36"); io.write("| " .. pad(t:upper(), IN - 2) .. " |"); off(); print("")
+local function section(title)
+    emit()
+    emit(CYAN .. title .. RESET)
+    emit(sep("-"))
 end
-local function boxend() print("+" .. string.rep("-", IN) .. "+") end
+local function menuitem(n, label)
+    emit(YELLOW .. n .. "." .. RESET .. " " .. WHITE .. label .. RESET)
+end
+local function prompt_line(t)
+    if not t:match("^%[%?%]") then t = "[?] " .. t end
+    if t:sub(-1) ~= ":" then t = t .. ":" end
+    return CYAN .. t .. RESET
+end
+local function ok_line(t)
+    if not t:match("^%[!%]") then t = "[!] " .. t end
+    if t:sub(-1) ~= "." then t = t .. "." end
+    return GREEN .. t .. RESET
+end
+local function warn_line(t)
+    if not t:match("^%[!%]") then t = "[!] " .. t end
+    if t:sub(-1) ~= "." then t = t .. "." end
+    return YELLOW .. t .. RESET
+end
+local function err_line(t)
+    if t:match("^%[!%]") then t = t:gsub("%[!%]", "[x]", 1)
+    elseif not t:match("^%[x%]") then t = "[x] " .. t end
+    if t:sub(-1) ~= "." then t = t .. "." end
+    return RED .. t .. RESET
+end
+local function ok(t) emit(ok_line(t)) end
+local function warn(t) emit(warn_line(t)) end
+local function err(t) emit(err_line(t)) end
+
 local function read_line()
     io.flush()
     local r = io.read("*l")
+    if r == nil then
+        local tty = io.open("/dev/tty", "r")
+        if tty then r = tty:read("*l"); tty:close() end
+    end
     return r
 end
 local function ask(label, default)
-    io.write("? " .. label .. (default and (" [" .. default .. "]") or "") .. " : ")
+    io.write(prompt_line(label .. (default and (" [" .. default .. "]") or "")) .. " ")
     io.flush()
     local r = read_line()
     if r == nil then return default end
@@ -606,18 +640,20 @@ local function ask(label, default)
     return r
 end
 local function pause()
-    io.write("\n"); col("90"); io.write("[enter]"); off(); io.write(" back..."); io.flush()
+    emit()
+    io.write(CYAN .. "[?] Press Enter to continue..." .. RESET)
+    io.flush()
     read_line()
 end
 
 -- ---------------------------------------------------------------- wizard
 local function wizard_packages(st)
-    head("Setup  >  packages")
+    header("Setup  >  packages")
     print("detecting clones with prefix: " .. st.prefix)
     local pkgs = detect_packages(st.prefix)
     if #pkgs == 0 then
         print("")
-        col("31"); print("no package found for prefix " .. st.prefix); off()
+        err("no package found for prefix " .. st.prefix)
         print("set the prefix first.")
         pause()
         return
@@ -655,29 +691,29 @@ local function wizard_packages(st)
     end
     save_state(st)
     print("")
-    col("32"); print(#chosen .. " package(s) saved."); off()
+    ok(#chosen .. " package(s) saved.")
     pause()
 end
 
 local function wizard_url(st)
-    head("Setup  >  private server url")
+    header("Setup  >  private server url")
     print("current: " .. (st.private_server_url ~= "" and st.private_server_url or "(none)"))
     print("")
     local u = ask("paste roblox share url", st.private_server_url)
     if u and u ~= "" then
         local code = u:match("code=([%w%-]+)")
         if not code then
-            col("31"); print("! url must contain code="); off(); pause(); return
+            err("! url must contain code="); pause(); return
         end
         st.private_server_url = u
         save_state(st)
-        col("32"); print("url saved (code " .. code:sub(1, 8) .. "..)"); off()
+        ok("url saved (code " .. code:sub(1, 8) .. "..)")
     end
     pause()
 end
 
 local function wizard_layout(st)
-    head("Setup  >  layout")
+    header("Setup  >  layout")
     print("layout is the local grid (top-to-bottom stack).")
     local sw, sh, d = detect_screen()
     if sw then print(string.format("screen: %dx%d  density: %d", sw, sh, d or 0)) end
@@ -695,8 +731,8 @@ local function wizard_layout(st)
         end
         print("")
         local ok, ch = freeform_enable_once(st)
-        if ok then col("32"); print("freeform enabled (" .. tostring(ch) .. " keys written)"); off()
-        else col("90"); print("freeform: " .. tostring(ch)); off() end
+        if ok then ok("freeform enabled (" .. tostring(ch) .. " keys written)")
+        else warn("freeform: " .. tostring(ch)) end
     end
     save_state(st)
     pause()
@@ -706,7 +742,7 @@ local function wizard_run(st)
     local step = 1
     while step <= 4 do
         if step == 1 then
-            head("Setup  >  device")
+            header("Setup  >  device")
             print("device name: " .. (st.device_name ~= "" and st.device_name or "(auto)"))
             print("")
             local n = ask("device name", st.device_name ~= "" and st.device_name or "Redfinger")
@@ -730,8 +766,8 @@ local function wizard_run(st)
             step = 5
         end
     end
-    head("Setup  >  done")
-    col("32"); print("setup complete."); off()
+    header("Setup  >  done")
+    ok("setup complete.")
     print("")
     print("packages: " .. #st.roblox_packages)
     print("url: " .. (st.private_server_url ~= "" and "set" or "none"))
@@ -923,15 +959,15 @@ local function run_engine(st)
     end
     table.sort(names)
     if #names == 0 then
-        head("Start"); col("31"); print("no package enabled."); off(); pause(); return
+        header("Start"); err("no package enabled."); pause(); return
     end
     if st.private_server_url == "" then
-        head("Start"); col("31"); print("no private server url."); off()
+        header("Start"); err("no private server url.")
         print("run setup first."); pause(); return
     end
     local sw, sh, dens = detect_screen()
     if not sw then
-        head("Start"); col("31"); print("failed to read screen size."); off(); pause(); return
+        header("Start"); err("failed to read screen size."); pause(); return
     end
     local inset = math.ceil(24 * (dens or 320) / 160)
 
@@ -944,7 +980,7 @@ local function run_engine(st)
     clear_cache_all(st)
 
     -- initial launch
-    head("Start  >  launching")
+    header("Start  >  launching")
     print(string.format("screen %dx%d  inset %d  freeform: %s", sw, sh, inset, fok and "enabled" or tostring(fmsg)))
     print("")
     local st_map = {}
@@ -1053,7 +1089,7 @@ local function run_engine(st)
             end
         end
         -- redraw
-        head("Running  [" .. (st.device_name ~= "" and st.device_name or "device") .. "]")
+        header("Running  [" .. (st.device_name ~= "" and st.device_name or "device") .. "]")
         print(string.format("  scan every %ds   grace %ds   url %s",
             SCAN, st.foreground_grace_seconds, st.private_server_url ~= "" and "set" or "none"))
         print("")
@@ -1066,7 +1102,7 @@ local function run_engine(st)
                 name, pid and tostring(pid) or "-", fmt_uptime(t - s.joined), mark))
         end
         print("")
-        col("90"); print("  press q + enter to stop"); off()
+        warn("  press q + enter to stop")
         io.flush()
         io.write("> "); io.flush()
         local k = read_line()
@@ -1074,29 +1110,28 @@ local function run_engine(st)
     end
     for _, name in ipairs(names) do st.status[name] = nil end
     save_state(st)
-    head("Stopped")
+    header("Stopped")
     print("engine stopped.")
     pause()
 end
 
 -- ---------------------------------------------------------------- main menu
 local function screen_status(st)
-    head("Status")
+    header("Status")
     local sw, sh = detect_screen()
     if sw then print(string.format("device: %s   screen: %dx%d", st.device_name, sw, sh)) end
     print("state file: " .. STATE_PATH)
     print("")
-    box("packages (" .. #st.roblox_packages .. ")")
+    section("packages (" .. #st.roblox_packages .. ")")
     if #st.roblox_packages == 0 then
-        line("(none, run setup)")
+        emit("(none, run setup)")
     else
         for i, e in ipairs(st.roblox_packages) do
             local pid = pidof(e.package)
-            line(string.format("%d. %-22s %s", i, e.package,
+            emit(string.format("%d. %-22s %s", i, e.package,
                 pid and ("pid " .. pid) or "stopped"))
         end
     end
-    boxend()
     print("")
     print("url: " .. (st.private_server_url ~= "" and st.private_server_url:sub(1, 40) .. ".." or "(none)"))
     print("")
@@ -1106,16 +1141,16 @@ local function screen_status(st)
 end
 
 local function screen_settings(st)
-    head("Settings")
-    print("  1. device name      : " .. st.device_name)
-    print("  2. prefix           : " .. st.prefix)
-    print("  3. private server   : " .. (st.private_server_url ~= "" and "set" or "(none)"))
-    print("  4. scan interval    : " .. st.health_check_interval_seconds .. "s")
-    print("  5. reconnect delay  : " .. st.reconnect_delay_seconds .. "s")
-    print("  6. launch delay     : " .. st.launch_delay_seconds .. "s")
-    print("  7. foreground grace : " .. st.foreground_grace_seconds .. "s")
-    print("  8. webhook          : " .. (st.webhook_enabled and st.webhook_url:sub(1, 24) or "off"))
-    print("  0. back")
+    header("Settings")
+    menuitem("1", "Device name      : " .. st.device_name)
+    menuitem("2", "Prefix           : " .. st.prefix)
+    menuitem("3", "Private server   : " .. (st.private_server_url ~= "" and "set" or "(none)"))
+    menuitem("4", "Scan interval    : " .. st.health_check_interval_seconds .. "s")
+    menuitem("5", "Reconnect delay  : " .. st.reconnect_delay_seconds .. "s")
+    menuitem("6", "Launch delay     : " .. st.launch_delay_seconds .. "s")
+    menuitem("7", "Foreground grace : " .. st.foreground_grace_seconds .. "s")
+    menuitem("8", "Webhook          : " .. (st.webhook_enabled and st.webhook_url:sub(1, 24) or "off"))
+    menuitem("0", "Back")
     print("")
     local c = ask("select", "0")
     if c == "1" then st.device_name = ask("device name", st.device_name); save_state(st)
@@ -1137,21 +1172,21 @@ end
 
 local function screen_tools(st)
     while true do
-        head("Tools")
-        print("  1. Auto-execute: add script")
-        print("  2. Auto-execute: remove all")
-        print("  3. Clear cache (all clones)")
-        print("  4. Minimize Termux")
-        print("  5. Termux boot: " .. (st.termux_boot_enabled and "ON" or "off"))
-        print("  6. Detect accounts (userid/cookie)")
-        print("  7. Keep screen awake: " .. (st.keep_screen_awake and "ON" or "off"))
-        print("  8. Low graphics: " .. (st.low_graphics_enabled and "ON" or "off"))
-        print("  0. back")
+        header("Tools")
+        menuitem("1", "Auto-execute: add script")
+        menuitem("2", "Auto-execute: remove all")
+        menuitem("3", "Clear cache (all clones)")
+        menuitem("4", "Minimize Termux")
+        menuitem("5", "Termux boot: " .. (st.termux_boot_enabled and "ON" or "off"))
+        menuitem("6", "Detect accounts (userid/cookie)")
+        menuitem("7", "Keep screen awake: " .. (st.keep_screen_awake and "ON" or "off"))
+        menuitem("8", "Low graphics: " .. (st.low_graphics_enabled and "ON" or "off"))
+        menuitem("0", "Back")
         print("")
         local c = ask("select", "0")
         if c == "0" or c == nil then return end
         if c == "1" then
-            head("Auto-execute")
+            header("Auto-execute")
             local names = {}
             for _, e in ipairs(st.roblox_packages) do if e.enabled then names[#names+1] = e.package end end
             if #names == 0 then print("no package."); pause()
@@ -1169,7 +1204,7 @@ local function screen_tools(st)
                     end
                     st.auto_execute_scripts[fn] = content
                     save_state(st)
-                    col("32"); print("written to " .. okc .. " clone(s)."); off()
+                    ok("written to " .. okc .. " clone(s).")
                 else print("cancelled.") end
                 pause()
             end
@@ -1181,24 +1216,24 @@ local function screen_tools(st)
             end
             st.auto_execute_scripts = {}
             save_state(st)
-            head("Auto-execute"); col("32"); print("removed all managed scripts."); off(); pause()
+            header("Auto-execute"); ok("removed all managed scripts."); pause()
         elseif c == "3" then
-            head("Cache")
+            header("Cache")
             print("clearing cache for all enabled clones...")
             clear_cache_all(st)
-            col("32"); print("done."); off(); pause()
+            ok("done."); pause()
         elseif c == "4" then
-            head("Minimize Termux")
+            header("Minimize Termux")
             local ok, tid = minimize_termux()
-            if ok then col("32"); print("termux task " .. tostring(tid) .. " minimized."); off()
-            else col("31"); print("failed: " .. tostring(tid)); off() end
+            if ok then ok("termux task " .. tostring(tid) .. " minimized.")
+            else err("failed: " .. tostring(tid)) end
             pause()
         elseif c == "5" then
             if st.termux_boot_enabled then termux_boot_remove(st) else termux_boot_install(st) end
             save_state(st)
-            head("Boot"); col("32"); print("boot: " .. (st.termux_boot_enabled and "ON" or "off")); off(); pause()
+            header("Boot"); ok("boot: " .. (st.termux_boot_enabled and "ON" or "off")); pause()
         elseif c == "6" then
-            head("Accounts")
+            header("Accounts")
             print("scanning...")
             print("")
             for _, e in ipairs(st.roblox_packages) do
@@ -1212,33 +1247,32 @@ local function screen_tools(st)
             st.keep_screen_awake = not st.keep_screen_awake
             keep_screen_awake(st.keep_screen_awake)
             save_state(st)
-            head("Screen"); col("32"); print("keep awake: " .. (st.keep_screen_awake and "ON" or "off")); off(); pause()
+            header("Screen"); ok("keep awake: " .. (st.keep_screen_awake and "ON" or "off")); pause()
         elseif c == "8" then
             st.low_graphics_enabled = not st.low_graphics_enabled
             save_state(st)
-            head("Graphics"); col("32"); print("low graphics: " .. (st.low_graphics_enabled and "ON" or "off")); off(); pause()
+            header("Graphics"); ok("low graphics: " .. (st.low_graphics_enabled and "ON" or "off")); pause()
         end
     end
 end
 
 local function screen_menu(st)
     while true do
-        head("Main")
-        box("device")
-        line("name  : " .. (st.device_name ~= "" and st.device_name or "(not set)"))
-        line("pkgs  : " .. #st.roblox_packages .. " selected")
-        line("url   : " .. (st.private_server_url ~= "" and "set" or "not set"))
-        line("state : " .. (st.first_setup_completed and "configured" or "setup needed"))
-        boxend()
+        header("Main")
+        section("device")
+        emit("name  : " .. (st.device_name ~= "" and st.device_name or "(not set)"))
+        emit("pkgs  : " .. #st.roblox_packages .. " selected")
+        emit("url   : " .. (st.private_server_url ~= "" and "set" or "not set"))
+        emit("state : " .. (st.first_setup_completed and "configured" or "setup needed"))
         print("")
-        print("  1. Start engine")
-        print("  2. Setup wizard")
-        print("  3. Status")
-        print("  4. Settings")
-        print("  5. Tools")
-        print("  6. Freeform check")
-        print("  7. View state file")
-        print("  0. Exit")
+        menuitem("1", "Start engine")
+        menuitem("2", "Setup wizard")
+        menuitem("3", "Status")
+        menuitem("4", "Settings")
+        menuitem("5", "Tools")
+        menuitem("6", "Freeform check")
+        menuitem("7", "View state file")
+        menuitem("0", "Exit")
         print("")
         local c = ask("select", "0")
         if c == "0" or c == nil then return "exit"
@@ -1248,7 +1282,7 @@ local function screen_menu(st)
         elseif c == "4" then screen_settings(st)
         elseif c == "5" then screen_tools(st)
         elseif c == "6" then
-            head("Freeform")
+            header("Freeform")
             print("freeform settings (read-only):")
             print("")
             for _, r in ipairs(freeform_status()) do
@@ -1258,7 +1292,7 @@ local function screen_menu(st)
             print("configured_at: " .. (st.runtime.freeform_configured_at or "(not yet this session)"))
             pause()
         elseif c == "7" then
-            head("State file")
+            header("State file")
             print(STATE_PATH)
             print("")
             local raw = read_file(STATE_PATH)
