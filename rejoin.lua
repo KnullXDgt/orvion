@@ -670,42 +670,13 @@ local function build_intent(pkg, ps_url, place_id)
     end
     return nil
 end
--- CASCADE FIX (evidence-based).
--- Device evidence: the cascade is NOT a plain foreground steal. The event log
--- shows the OTHER clones dying with:
---     am_anr : [.., com.roblox.clienX, .. executing service
---               com.roblox.clienX/com.applisto.appcloner.classes.PersistentAppService]
---     am_kill: [.., com.roblox.clienX, 0, bg anr]
--- i.e. while one clone cold-boots (heavy), the cloner's keep-alive
--- "PersistentAppService" in the OTHER clones is asked to run a start, does not
--- answer within the ANR service timeout (~20s), and Android kills those
--- processes -> Roblox leaves the game (leaveUGCGame) = cascade. It is memory/
--- scheduling dependent, which is why it is intermittent.
--- Mitigations applied here:
---  1) raise the ANR service timeout once (service_timeout / service_background_timeout)
---     so a busy service is not killed at 20s.
---  2) right before a cold relaunch, stop the PersistentAppService in the OTHER
---     clones so they are not holding a start request that can ANR.
+-- CASCADE FIX (per-app): the relaunch only ever touches the target app.
+-- We deliberately do NOT stop services in other clones anymore: that was a
+-- cross-app poke (not "per app") and did not help. Serialization (one
+-- relaunch per cycle, in the monitor loop) is what keeps the device calm.
 -- Cold start (force-stop + am start deep link) is KEPT: it is required to
 -- actually enter a game (warm start lands on Home and never joins).
-local function am_settings_fix()
-    su_exec("settings put global activity_manager_constants " ..
-        "service_timeout=60000,service_background_timeout=60000")
-end
-
-local function quiesce_other_clones(names, keep)
-    local parts = {}
-    for _, n in ipairs(names) do
-        if n ~= keep then
-            parts[#parts + 1] = "am stopservice " .. n ..
-                "/com.applisto.appcloner.classes.PersistentAppService"
-        end
-    end
-    if #parts > 0 then su_exec(table.concat(parts, "; ")) end
-end
-
--- CASCADE FIX helpers (see launch notes above)
-local ACTIVE_NAMES = nil   -- set by screen_start; used by relaunch() to quiesce others
+local ACTIVE_NAMES = nil   -- set by screen_start
 
 local function launch(pkg, ps_url, place_id, reason, no_stop)
     local intent = build_intent(pkg, ps_url, place_id)
@@ -911,11 +882,9 @@ local function enter_ps(s, ps_idx, now)
 end
 
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
--- CASCADE FIX: before cold-starting this clone, quiet the keep-alive service
--- of the OTHER clones so they don't ANR (see notes above am_settings_fix).
+-- Per-app: only the target package is touched (no cross-app pokes).
 local function relaunch(s, _p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
-    if ACTIVE_NAMES then quiesce_other_clones(ACTIVE_NAMES, name) end
     launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
     s.born = now            -- (re)start the boot-grace window
     s.status = reason
@@ -946,9 +915,6 @@ screen_start = function(cfg, mode)
         head("Start"); col("31"); print("failed to read screen size."); off(); pause(); return
     end
 
-    -- CASCADE FIX: raise ANR service timeout so the cloner's keep-alive service
-    -- in the other clones is not killed at ~20s while a clone cold-boots.
-    am_settings_fix()
     ACTIVE_NAMES = names
 
     if cfg.autoexec_path ~= "" and cfg.autoexec_script ~= "" then
@@ -1145,7 +1111,28 @@ screen_start = function(cfg, mode)
         col("90"); print("press y or Enter to stop & close all"); off()
         end
 
-        local k = read_key(1)
+        local k
+        if HEADLESS then
+            -- PERF: no keyboard here -> don't pay read_key's per-second shell
+            -- spawn. Sleep ONE chunk until the next thing that actually matters
+            -- (next scan / soonest heartbeat / soonest hop), min 1s max SCAN_SEC.
+            local nt = nil
+            local function consider(t)
+                if t then if not nt or t < nt then nt = t end end
+            end
+            consider(next_scan)
+            for _, nm in ipairs(names) do consider(st[nm].hb_next) end
+            if mode == "hopper" then
+                for _, nm in ipairs(names) do consider(st[nm].rj_next) end
+            end
+            local wait = (nt and nt - os.time()) or 5
+            if wait < 1 then wait = 1 end
+            if wait > SCAN_SEC then wait = SCAN_SEC end
+            os.execute("sleep " .. wait)   -- one spawn per wait, not per second
+            k = nil
+        else
+            k = read_key(1)
+        end
         if k == "" or (k and k:lower() == "y") then quit = true; break end
 
         now = os.time()
@@ -1171,6 +1158,12 @@ screen_start = function(cfg, mode)
                 if p then fresh_alive[p] = true end
             end
         end
+        -- CASCADE FIX (per-app, serialized): relaunch AT MOST ONE client per
+        -- cycle. The old loop walked all names in one pass and cold-started
+        -- every dead client within ~2s ("blind force-stop + am start" storm),
+        -- which is the tool's own doing. One cold start at a time keeps the
+        -- device calm and treats each app independently (no cross-app pokes).
+        local did_relaunch = false
         for _, name in ipairs(names) do
             local s = st[name]; local p = cfg.pkgs[name]
             if s.halted then
@@ -1183,12 +1176,13 @@ screen_start = function(cfg, mode)
                         s.halted = true
                         s.halt_code = "ban " .. d.code
                         hlog("HALT " .. name .. " (code " .. d.code .. ")")
-                    else
+                    elseif not did_relaunch then
                         hlog("disconnect " .. name .. " code " .. d.code .. " -> relaunch")
                         relaunch(s, p, cfg, name, "rejoin " .. d.code, false, now)
+                        did_relaunch = true
                         -- same PS: keep accumulating this PS's time (no new visit)
                     end
-                elseif mode == "hopper" and p.rejoin > 0 and now >= s.rj_next then
+                elseif mode == "hopper" and p.rejoin > 0 and now >= s.rj_next and not did_relaunch then
                     s.rj_next = now + (p.rejoin * 60)
                     if #s.plist > 1 then
                         s.pptr = s.pptr + 1
@@ -1197,6 +1191,7 @@ screen_start = function(cfg, mode)
                     enter_ps(s, s.plist[s.pptr] or 1, now)   -- close old PS, open new
                     hlog("hop " .. name .. " (ps " .. (s.plist[s.pptr] or 1) .. ")")
                     relaunch(s, p, cfg, name, "hop", true, now)
+                    did_relaunch = true
                     s.hops = s.hops + 1
                 elseif need_fresh[name] then
                     s.hb_next = now + p.heartbeat
@@ -1212,10 +1207,11 @@ screen_start = function(cfg, mode)
                     elseif pm[name] and not alive_now then
                         hlog("heartbeat " .. name .. " pm=alive real=dead")
                     end
-                    if not alive_now and (now - s.born) >= HEARTBEAT_GRACE then
+                    if not alive_now and (now - s.born) >= HEARTBEAT_GRACE and not did_relaunch then
                         hlog("heartbeat " .. name .. " dead -> relaunch")
                         relaunch(s, p, cfg, name, "dead", false, now)
                         s.born = now
+                        did_relaunch = true
                         -- same PS: do not reset the PS visit accumulator
                     end
                 end
