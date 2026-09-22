@@ -310,12 +310,28 @@ local function read_line()
     return r
 end
 
+-- PERF: detect whether we are attached to a real terminal. When the tool runs
+-- headless (e.g. `... > log 2>&1 < /dev/null` as in _go.sh), there is NO ONE
+-- watching the screen, yet the old code still cleared+redrew the whole UI and
+-- spawned a `bash` every second for read_key -> pure waste on a loaded device.
+local HEADLESS = false
+do
+    local f = io.open("/dev/tty", "r")
+    if f then f:close() else HEADLESS = true end
+    -- also treat stdout redirected to a file as headless
+    local h = io.popen("test -t 1 && echo tty || echo notty 2>/dev/null")
+    if h then local r = (h:read("*a") or ""):gsub("%s", ""); h:close(); if r == "notty" then HEADLESS = true end end
+end
+
 -- single key, waits up to t seconds.
 --   nil  -> timeout (NO key pressed)  <-- must NOT be treated as Enter
 --   ""   -> Enter pressed
 --   "x"  -> the key
 -- We use the shell exit code: `read -t` returns >128 on timeout, 0 on a real key.
+-- PERF: in headless mode there is no keyboard; just sleep the interval without
+-- spawning a shell at all (was: a `bash` spawn every single second).
 local function read_key(t)
+    if HEADLESS then sleep(t or 1); return nil end
     local cmd = "bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null; " ..
                 "if [ $? -eq 0 ]; then printf \"K%s\" \"$k\"; else printf __TO__; fi' 2>/dev/null"
     local h = io.popen(cmd)
@@ -654,27 +670,21 @@ local function build_intent(pkg, ps_url, place_id)
     end
     return nil
 end
--- PERF: was 3 process spawns per relaunch (su force-stop, shell `sleep 1`,
--- su am start). One su call runs the whole sequence -> 1 spawn. A relaunch
--- storm was 18x these in 30 min, so this removes ~36 spawns of pure churn.
--- CASCADE FIX (verified on device, 2/2 runs):
--- The clones run in FULLSCREEN (cloner forces it). A plain `am start` brings
--- the relaunched client to the FOREGROUND; Android allows only ONE resumed
--- activity, so the cloner destroys the other clones' surfaces ->
--- surfaceDestroyed -> Roblox leaveUGCGame (285) on the OTHER clients = the
--- cascade. Launching with `--windowingMode 5` (freeform) does NOT steal the
--- foreground, so the other clients keep their surfaces. Measured: with the
--- flag, killing+relaunching one client left the other two PIDs untouched and
--- zero leaveUGCGame/surfaceDestroyed; without it, the others dropped out.
-local AM_START_OPTS = "--windowingMode 5"
+-- CANDIDATE FIX (cascade) — WARM relaunch, NEVER force-stop.
+-- Evidence on device: leaving a game BY HAND (tap Leave -> home screen,
+-- process stays alive) does NOT cascade the other clones. But the tool's
+-- relaunch (am force-stop + am start) DID: the other clients logged
+-- leaveUGCGame ~8-14s later and got restarted. force-stop kills the
+-- process, the cloner (com.applisto.appcloner) notices and re-layouts all
+-- clones, destroying the OTHER clones' surfaces -> they leave the game.
+-- So relaunch the same way a hand-leave recovers: just `am start` the deep
+-- link on the still-alive process. If the process is genuinely dead,
+-- am start cold-boots it anyway (unavoidable), but we no longer force-kill
+-- a healthy process.
 local function launch(pkg, ps_url, place_id, reason, no_stop)
     local intent = build_intent(pkg, ps_url, place_id)
     if not intent then hlog("SKIP " .. pkg); return false end
-    if no_stop then
-        su_exec('am start ' .. AM_START_OPTS .. ' --user 0 "' .. intent .. '"')
-    else
-        su_exec("am force-stop " .. pkg .. "; sleep 1; am start " .. AM_START_OPTS .. " --user 0 \"" .. intent .. "\"")
-    end
+    su_exec('am start --user 0 "' .. intent .. '"')
     hlog("LAUNCH " .. pkg .. " [" .. (reason or "join") .. "]")
     return true
 end
@@ -947,12 +957,19 @@ screen_start = function(cfg, mode)
         local L, T, R, B = grid_bounds(i, #names, sw, sh, off_)
         lstat[name] = "starting"
         draw_launch(i, cfg.launch_delay)
-        su_exec("am force-stop " .. name)
-        sleep(1)
+        -- CANDIDATE FIX: do NOT force-stop on start. force-stop kills the
+        -- process and the cloner re-layouts -> cascade. Only cold-launch
+        -- packages that are not already running; a running one is left alone
+        -- (pressing Start no longer re-launches healthy clients).
+        local alive = (su_cmd("pidof " .. name) ~= "")
         apply_layout(name, L, T, R, B)
         local plist = ps_list_of(p, cfg)
         if mode == "rejoin" then plist = { plist[1] } end   -- stay on ONE server
-        launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", true)
+        if not alive then
+            launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", true)
+        else
+            hlog("START-SKIP " .. name .. " (already running)")
+        end
         st[name] = {
             hb_next = os.time() + p.heartbeat,
             rj_next = os.time() + (p.rejoin * 60),   -- minutes -> seconds
@@ -1032,6 +1049,9 @@ screen_start = function(cfg, mode)
             end
         end
 
+        -- PERF: only redraw when someone is actually watching (a real tty).
+        -- Headless runs skip the whole clear+repaint every second.
+        if not HEADLESS then
         head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
         box_open("resource")
         box_line(fmt_res())
@@ -1085,6 +1105,7 @@ screen_start = function(cfg, mode)
         box_close()
         print("")
         col("90"); print("press y or Enter to stop & close all"); off()
+        end
 
         local k = read_key(1)
         if k == "" or (k and k:lower() == "y") then quit = true; break end
