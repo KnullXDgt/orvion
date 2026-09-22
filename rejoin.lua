@@ -657,13 +657,23 @@ end
 -- PERF: was 3 process spawns per relaunch (su force-stop, shell `sleep 1`,
 -- su am start). One su call runs the whole sequence -> 1 spawn. A relaunch
 -- storm was 18x these in 30 min, so this removes ~36 spawns of pure churn.
+-- CASCADE FIX (verified on device, 2/2 runs):
+-- The clones run in FULLSCREEN (cloner forces it). A plain `am start` brings
+-- the relaunched client to the FOREGROUND; Android allows only ONE resumed
+-- activity, so the cloner destroys the other clones' surfaces ->
+-- surfaceDestroyed -> Roblox leaveUGCGame (285) on the OTHER clients = the
+-- cascade. Launching with `--windowingMode 5` (freeform) does NOT steal the
+-- foreground, so the other clients keep their surfaces. Measured: with the
+-- flag, killing+relaunching one client left the other two PIDs untouched and
+-- zero leaveUGCGame/surfaceDestroyed; without it, the others dropped out.
+local AM_START_OPTS = "--windowingMode 5"
 local function launch(pkg, ps_url, place_id, reason, no_stop)
     local intent = build_intent(pkg, ps_url, place_id)
     if not intent then hlog("SKIP " .. pkg); return false end
     if no_stop then
-        su_exec('am start --user 0 "' .. intent .. '"')
+        su_exec('am start ' .. AM_START_OPTS .. ' --user 0 "' .. intent .. '"')
     else
-        su_exec("am force-stop " .. pkg .. "; sleep 1; am start --user 0 \"" .. intent .. "\"")
+        su_exec("am force-stop " .. pkg .. "; sleep 1; am start " .. AM_START_OPTS .. " --user 0 \"" .. intent .. "\"")
     end
     hlog("LAUNCH " .. pkg .. " [" .. (reason or "join") .. "]")
     return true
