@@ -670,21 +670,51 @@ local function build_intent(pkg, ps_url, place_id)
     end
     return nil
 end
--- CANDIDATE FIX (cascade) — WARM relaunch, NEVER force-stop.
--- Evidence on device: leaving a game BY HAND (tap Leave -> home screen,
--- process stays alive) does NOT cascade the other clones. But the tool's
--- relaunch (am force-stop + am start) DID: the other clients logged
--- leaveUGCGame ~8-14s later and got restarted. force-stop kills the
--- process, the cloner (com.applisto.appcloner) notices and re-layouts all
--- clones, destroying the OTHER clones' surfaces -> they leave the game.
--- So relaunch the same way a hand-leave recovers: just `am start` the deep
--- link on the still-alive process. If the process is genuinely dead,
--- am start cold-boots it anyway (unavoidable), but we no longer force-kill
--- a healthy process.
+-- CASCADE FIX (evidence-based).
+-- Device evidence: the cascade is NOT a plain foreground steal. The event log
+-- shows the OTHER clones dying with:
+--     am_anr : [.., com.roblox.clienX, .. executing service
+--               com.roblox.clienX/com.applisto.appcloner.classes.PersistentAppService]
+--     am_kill: [.., com.roblox.clienX, 0, bg anr]
+-- i.e. while one clone cold-boots (heavy), the cloner's keep-alive
+-- "PersistentAppService" in the OTHER clones is asked to run a start, does not
+-- answer within the ANR service timeout (~20s), and Android kills those
+-- processes -> Roblox leaves the game (leaveUGCGame) = cascade. It is memory/
+-- scheduling dependent, which is why it is intermittent.
+-- Mitigations applied here:
+--  1) raise the ANR service timeout once (service_timeout / service_background_timeout)
+--     so a busy service is not killed at 20s.
+--  2) right before a cold relaunch, stop the PersistentAppService in the OTHER
+--     clones so they are not holding a start request that can ANR.
+-- Cold start (force-stop + am start deep link) is KEPT: it is required to
+-- actually enter a game (warm start lands on Home and never joins).
+local function am_settings_fix()
+    su_exec("settings put global activity_manager_constants " ..
+        "service_timeout=60000,service_background_timeout=60000")
+end
+
+local function quiesce_other_clones(names, keep)
+    local parts = {}
+    for _, n in ipairs(names) do
+        if n ~= keep then
+            parts[#parts + 1] = "am stopservice " .. n ..
+                "/com.applisto.appcloner.classes.PersistentAppService"
+        end
+    end
+    if #parts > 0 then su_exec(table.concat(parts, "; ")) end
+end
+
+-- CASCADE FIX helpers (see launch notes above)
+local ACTIVE_NAMES = nil   -- set by screen_start; used by relaunch() to quiesce others
+
 local function launch(pkg, ps_url, place_id, reason, no_stop)
     local intent = build_intent(pkg, ps_url, place_id)
     if not intent then hlog("SKIP " .. pkg); return false end
-    su_exec('am start --user 0 "' .. intent .. '"')
+    if not no_stop then
+        su_exec("am force-stop " .. pkg .. "; sleep 1; am start --user 0 \"" .. intent .. "\"")
+    else
+        su_exec('am start --user 0 "' .. intent .. '"')
+    end
     hlog("LAUNCH " .. pkg .. " [" .. (reason or "join") .. "]")
     return true
 end
@@ -881,8 +911,11 @@ local function enter_ps(s, ps_idx, now)
 end
 
 -- relaunch one package. scheduled=true means hopper timer (not a failure)
+-- CASCADE FIX: before cold-starting this clone, quiet the keep-alive service
+-- of the OTHER clones so they don't ANR (see notes above am_settings_fix).
 local function relaunch(s, _p, cfg, name, reason, scheduled, now)
     local pi = (s.plist and s.plist[s.pptr]) or 1
+    if ACTIVE_NAMES then quiesce_other_clones(ACTIVE_NAMES, name) end
     launch(name, cfg.ps[pi] or cfg.place_id or "", cfg.place_id, reason)
     s.born = now            -- (re)start the boot-grace window
     s.status = reason
@@ -912,6 +945,11 @@ screen_start = function(cfg, mode)
     if not sw then
         head("Start"); col("31"); print("failed to read screen size."); off(); pause(); return
     end
+
+    -- CASCADE FIX: raise ANR service timeout so the cloner's keep-alive service
+    -- in the other clones is not killed at ~20s while a clone cold-boots.
+    am_settings_fix()
+    ACTIVE_NAMES = names
 
     if cfg.autoexec_path ~= "" and cfg.autoexec_script ~= "" then
         su_exec("mkdir -p " .. (cfg.autoexec_path:match("^(.*)/") or "."))
