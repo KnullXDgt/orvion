@@ -894,6 +894,7 @@ screen_start = function(cfg, mode)
     local primed = false
     local last_status = 0
     local last_draw = 0
+    local _rot = 0
     local SCAN_SEC = scan_interval(cfg, names)
     while not quit do
         local now = os.time()
@@ -1027,7 +1028,15 @@ screen_start = function(cfg, mode)
         end
 
         local did_relaunch = false
-        for _, name in ipairs(names) do
+        -- FAIRNESS: rotate the iteration start each cycle, otherwise the first
+        -- client in `names` always wins the single relaunch slot and every
+        -- other dead client starves forever.
+        _rot = (_rot + 1) % #names
+        local order = {}
+        for k = 1, #names do
+            order[k] = names[((_rot + k - 1) % #names) + 1]
+        end
+        for _, name in ipairs(order) do
             local s = st[name]; local p = cfg.pkgs[name]
             if s.halted then
 
@@ -1085,12 +1094,14 @@ screen_start = function(cfg, mode)
         end
     end
 
-    head("Start")
-    print("close all roblox?")
-    local r = prompt(nil, "y / n")
-    if r and r:lower() == "y" then
-        for _, name in ipairs(names) do su_exec("am force-stop " .. name) end
-        col("32"); print("all closed."); off()
+    if HAS_TTY then
+        head("Start")
+        print("close all roblox?")
+        local r = prompt(nil, "y / n")
+        if r and r:lower() == "y" then
+            for _, name in ipairs(names) do su_exec("am force-stop " .. name) end
+            col("32"); print("all closed."); off()
+        end
     end
     if cfg.autoexec_path ~= "" then
         su_exec("cp " .. cfg.autoexec_path .. ".bak " .. cfg.autoexec_path .. " 2>/dev/null")
