@@ -274,16 +274,17 @@ local function read_line()
 end
 
 local HEADLESS = false
+local HAS_TTY = false
 do
     local f = io.open("/dev/tty", "r")
-    if f then f:close() else HEADLESS = true end
+    if f then f:close(); HAS_TTY = true else HEADLESS = true end
 
     local h = io.popen("test -t 1 && echo tty || echo notty 2>/dev/null")
     if h then local r = (h:read("*a") or ""):gsub("%s", ""); h:close(); if r == "notty" then HEADLESS = true end end
 end
 
 local function read_key(t)
-    if HEADLESS then sleep(t or 1); return nil end
+    if not HAS_TTY then sleep(t or 1); return nil end
     local cmd = "bash -c 'read -t " .. (t or 1) .. " -n 1 k < /dev/tty 2>/dev/null; " ..
                 "if [ $? -eq 0 ]; then printf \"K%s\" \"$k\"; else printf __TO__; fi' 2>/dev/null"
     local h = io.popen(cmd)
@@ -472,7 +473,8 @@ local function scan_state(names)
     if _log_ts then
         logpart = "logcat -d -T '" .. _log_ts .. "' -s Roblox 2>/dev/null"
     else
-        logpart = "logcat -d -t 300 -s Roblox 2>/dev/null"
+        local t0 = os.date("%m-%d %H:%M:%S.000", os.time() - 120)
+        logpart = "logcat -d -T '" .. t0 .. "' -s Roblox 2>/dev/null"
     end
 
     _log_ts = os.date("%m-%d %H:%M:%S.000", os.time() - 8)
@@ -797,6 +799,8 @@ screen_start = function(cfg, mode)
 
     ACTIVE_NAMES = names
 
+    su_exec("logcat -G 4M")
+
     if cfg.autoexec_path ~= "" and cfg.autoexec_script ~= "" then
         su_exec("mkdir -p " .. (cfg.autoexec_path:match("^(.*)/") or "."))
         su_exec("cp " .. cfg.autoexec_path .. " " .. cfg.autoexec_path .. ".bak 2>/dev/null")
@@ -844,11 +848,10 @@ screen_start = function(cfg, mode)
         apply_layout(name, L, T, R, B)
         local plist = ps_list_of(p, cfg)
         if mode == "rejoin" then plist = { plist[1] } end
-        if not alive then
-            launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", true)
-        else
-            hlog("START-SKIP " .. name .. " (already running)")
+        if alive then
+            hlog("START-RESTART " .. name .. " (was running, forcing fresh join)")
         end
+        launch(name, cfg.ps[plist[1]] or cfg.place_id or "", cfg.place_id, "start", false)
         st[name] = {
             hb_next = os.time() + p.heartbeat,
             rj_next = os.time() + (p.rejoin * 60),
@@ -890,6 +893,7 @@ screen_start = function(cfg, mode)
     local next_scan = 0
     local primed = false
     local last_status = 0
+    local last_draw = 0
     local SCAN_SEC = scan_interval(cfg, names)
     while not quit do
         local now = os.time()
@@ -921,64 +925,67 @@ screen_start = function(cfg, mode)
             end
         end
 
-        if not HEADLESS then
-        head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
-        box_open("resource")
-        box_line(fmt_res())
-        box_close()
-        print("")
+        if (now - last_draw) >= 1 then
+            last_draw = now
+            head("Start [" .. mode .. "]  (" .. fmt_clock(now - t0) .. ")")
+            box_open("resource")
+            box_line(fmt_res())
+            box_close()
+            print("")
 
-        box_open("package")
-        if mode == "hopper" then
-            box_line(string.format("%-2s %-14s %-4s %-5s %-6s %-2s %s",
-                "#", "package", "ps", "join", "up", "hp", "st"))
-            box_blank()
-            for i, name in ipairs(names) do
-                local s = st[name]
-                local mark
-                if s.halted then mark = "HALT " .. (s.halt_code or "")
-                elseif dis[name] then mark = "code " .. dis[name].code
-                elseif pm[name] then mark = "alive"
-                else mark = "dead" end
-                local first = true
-                for _, ps in ipairs(s.plist) do
-                    local h = s.ps_hist[ps]
-                    if h then
-                        local secs = h.sec
-                        if s.cur_ps == ps then secs = secs + (now - h.joined) end
-                        box_line(string.format("%-2s %-14s ps%-2d %-5s %-6s %-2d %s",
-                            first and tostring(i) or "", first and cut(name, 14) or "",
-                            ps, os.date("%H:%M", h.joined),
-                            fmt_elapsed(secs), h.hops, first and mark or ""))
-                        first = false
+            box_open("package")
+            if mode == "hopper" then
+                box_line(string.format("%-2s %-14s %-4s %-5s %-6s %-2s %s",
+                    "#", "package", "ps", "join", "up", "hp", "st"))
+                box_blank()
+                for i, name in ipairs(names) do
+                    local s = st[name]
+                    local mark
+                    if s.halted then mark = "HALT " .. (s.halt_code or "")
+                    elseif dis[name] then mark = "code " .. dis[name].code
+                    elseif pm[name] then mark = "alive"
+                    else mark = "dead" end
+                    local first = true
+                    for _, ps in ipairs(s.plist) do
+                        local h = s.ps_hist[ps]
+                        if h then
+                            local secs = h.sec
+                            if s.cur_ps == ps then secs = secs + (now - h.joined) end
+                            box_line(string.format("%-2s %-14s ps%-2d %-5s %-6s %-2d %s",
+                                first and tostring(i) or "", first and cut(name, 14) or "",
+                                ps, os.date("%H:%M", h.joined),
+                                fmt_elapsed(secs), h.hops, first and mark or ""))
+                            first = false
+                        end
                     end
+                    if i < #names then box_line(string.rep("-", IN - 4)) end
                 end
-                if i < #names then box_line(string.rep("-", IN - 4)) end
+            else
+                box_line(string.format("%-2s %-17s %-4s %-6s %s",
+                    "#", "package", "ps", "up", "status"))
+                box_blank()
+                for i, name in ipairs(names) do
+                    local s = st[name]
+                    local cur = s.plist[s.pptr] or 1
+                    local mark
+                    if s.halted then mark = "halted " .. (s.halt_code or "")
+                    elseif dis[name] then mark = "code " .. dis[name].code
+                    elseif pm[name] then mark = "alive"
+                    else mark = "dead" end
+                    box_line(string.format("%-2d %-17s %-4s %-6s %s",
+                        i, cut(name, 17), "ps" .. cur,
+                        fmt_elapsed(now - s.joined), mark))
+                end
             end
-        else
-            box_line(string.format("%-2s %-17s %-4s %-6s %s",
-                "#", "package", "ps", "up", "status"))
-            box_blank()
-            for i, name in ipairs(names) do
-                local s = st[name]
-                local cur = s.plist[s.pptr] or 1
-                local mark
-                if s.halted then mark = "halted " .. (s.halt_code or "")
-                elseif dis[name] then mark = "code " .. dis[name].code
-                elseif pm[name] then mark = "alive"
-                else mark = "dead" end
-                box_line(string.format("%-2d %-17s %-4s %-6s %s",
-                    i, cut(name, 17), "ps" .. cur,
-                    fmt_elapsed(now - s.joined), mark))
+            box_close()
+            print("")
+            col("90"); print("press y or Enter to stop & close all"); off()
             end
-        end
-        box_close()
-        print("")
-        col("90"); print("press y or Enter to stop & close all"); off()
-        end
 
         local k
-        if HEADLESS then
+        if HAS_TTY then
+            k = read_key(1)
+        else
 
             local nt = nil
             local function consider(t)
@@ -994,8 +1001,6 @@ screen_start = function(cfg, mode)
             if wait > SCAN_SEC then wait = SCAN_SEC end
             os.execute("sleep " .. wait)
             k = nil
-        else
-            k = read_key(1)
         end
         if k == "" or (k and k:lower() == "y") then quit = true; break end
 
